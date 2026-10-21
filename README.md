@@ -32,7 +32,12 @@ doppel/
 
 <br>
 
-### Run it
+## Link: https://ltorl.github.io/doppel-voice-cloning
+
+<br>
+
+<details>
+<summary><h2>Other ways to run it<h2></summary>
 
 Serve the folder from anywhere and open it in Chrome or Edge:
 
@@ -45,11 +50,6 @@ Then open **http://localhost:8000**.
 1. **Load the model**: about 640 MB the first time, then cached by the browser
 2. **Give it a voice**: drop a clip, pick a file, or record 5–15 seconds
 3. **Type, generate, download** a WAV
-
-<br>
-
-<details>
-<summary><b>Other ways to run it</b></summary>
 
 <br>
 
@@ -69,8 +69,6 @@ Drop `index.html` on GitHub Pages, Netlify, Cloudflare Pages, or any HTTPS host.
 
 </details>
 
-<br>
-<br>
 <br>
 <br>
 
