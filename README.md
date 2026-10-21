@@ -1,6 +1,7 @@
 <div align="center">
 
-<img width="760" height="224" alt="Doppel" src="banner.svg" />
+<img width="760" height="224" alt="banner" src="https://github.com/user-attachments/assets/21980482-3a7d-4134-b43f-10c8cf23edc8" />
+
 
 ### Clone any voice in one HTML file.
 
