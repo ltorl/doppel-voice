@@ -202,8 +202,6 @@ Everything is optional. Open **Advanced settings** under the text box:
 
 Only clone voices you have **explicit permission** to use: your own, or someone who has consented. Don't use Doppel to impersonate, defraud or mislead anyone.
 
-Resemble AI's official Python package adds an imperceptible [PerTh watermark](https://github.com/resemble-ai/perth) to its outputs. That watermarker has no browser port, so **audio made with Doppel is not watermarked**.
-
 <br>
 
 ## Credits
