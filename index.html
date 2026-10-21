@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doppel</title>
+<meta name="description" content="Doppel — zero-shot voice cloning in your browser with Chatterbox-Turbo. Runs locally on WebGPU or WASM; nothing is uploaded.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='12' cy='16' r='9' fill='%236d5efc'/><circle cx='20' cy='16' r='9' fill='%2322c3a6' fill-opacity='.8'/></svg>">
+<style>
+:root {
+  --bg: #f6f5f2;
+  --surface: #ffffff;
+  --surface-2: #f0eee9;
+  --border: #e2dfd8;
+  --text: #1d1b18;
+  --muted: #6b675f;
+  --accent: #5b4cf0;
+  --accent-2: #12a58c;
+  --accent-ink: #ffffff;
+  --danger: #d0402b;
+  --warn: #b7791f;
+  --focus: #5b4cf055;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.05);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121214; --surface: #1b1b1f; --surface-2: #24242a; --border: #303038;
+    --text: #ecebe8; --muted: #9c9a94; --accent: #8a7dff; --accent-2: #2fd4b5;
+    --accent-ink: #0f0f12; --danger: #ff6b55; --warn: #e0a84a; --focus: #8a7dff55;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121214; --surface: #1b1b1f; --surface-2: #24242a; --border: #303038;
+  --text: #ecebe8; --muted: #9c9a94; --accent: #8a7dff; --accent-2: #2fd4b5;
+  --accent-ink: #0f0f12; --danger: #ff6b55; --warn: #e0a84a; --focus: #8a7dff55;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 880px; margin: 0 auto; padding: 32px 16px 64px; }
+header { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+.logo { width: 40px; height: 40px; flex: none; }
+h1 { font-size: 28px; letter-spacing: -.02em; margin: 0; }
+.tag { color: var(--muted); margin: 0 0 24px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+}
+.card h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 10px; }
+.step {
+  width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center;
+  font-size: 12px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border);
+}
+.step.done { background: var(--accent-2); color: var(--accent-ink); border-color: transparent; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.grow { flex: 1 1 auto; }
+label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+select, input[type=number], textarea {
+  font: inherit; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+}
+textarea { width: 100%; min-height: 130px; resize: vertical; line-height: 1.55; }
+select:focus, input:focus, textarea:focus, button:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+button {
+  font: inherit; font-weight: 550; cursor: pointer; border-radius: 9px; padding: 9px 16px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button.danger { color: var(--danger); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.chip { padding: 4px 10px; font-size: 13px; font-weight: 500; border-radius: 999px; }
+.muted { color: var(--muted); font-size: 13px; }
+.small { font-size: 12px; }
+.bar { height: 6px; background: var(--surface-2); border-radius: 99px; overflow: hidden; border: 1px solid var(--border); }
+.bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .15s; }
+.files { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin-top: 10px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.drop {
+  border: 1.5px dashed var(--border); border-radius: 12px; padding: 18px; text-align: center;
+  color: var(--muted); transition: border-color .15s, background .15s;
+}
+.drop.over { border-color: var(--accent); background: var(--surface-2); }
+.drop strong { color: var(--text); }
+audio { width: 100%; height: 40px; }
+.rec-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); display: inline-block; animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 12px; }
+.adv { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 10px; }
+.out { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-top: 10px; background: var(--surface-2); }
+.out p { margin: 0 0 8px; font-size: 13px; overflow-wrap: anywhere; }
+.badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+.badge.ok { color: var(--accent-2); border-color: currentColor; }
+.badge.warn { color: var(--warn); border-color: currentColor; }
+#log {
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+  background: var(--surface-2); border-radius: 8px; padding: 10px; max-height: 180px; overflow: auto;
+  white-space: pre-wrap; margin-top: 8px;
+}
+.note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--warn); padding: 4px 10px; margin: 12px 0 0; }
+footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 28px; }
+footer a { color: inherit; }
+@media (max-width: 560px) { h1 { font-size: 24px; } .card { padding: 16px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <svg class="logo" viewBox="0 0 40 40" aria-hidden="true">
+      <circle cx="15" cy="20" r="11" fill="var(--accent)"/>
+      <circle cx="25" cy="20" r="11" fill="var(--accent-2)" fill-opacity=".8"/>
+      <path d="M11 20h2M15 15v10M19 17v6M23 13v14M27 16v8M31 19v2" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <h1>Doppel</h1>
+    <span class="badge" id="deviceBadge">detecting…</span>
+  </header>
+  <p class="tag">Zero-shot voice cloning with Chatterbox-Turbo, running entirely in your browser. Your audio never leaves this device.</p>
+
+  <!-- 1. Model -->
+  <section class="card">
+    <h2><span class="step" id="s1">1</span> Load the model</h2>
+    <div class="row">
+      <label class="f">Backend
+        <select id="backend">
+          <option value="webgpu">WebGPU (fast)</option>
+          <option value="wasm">WASM (CPU)</option>
+        </select>
+      </label>
+      <label class="f">Precision
+        <select id="precision"></select>
+      </label>
+      <div class="grow"></div>
+      <button id="loadBtn" class="primary">Download &amp; load</button>
+    </div>
+    <div style="margin-top:14px" class="bar"><i id="loadBar"></i></div>
+    <div class="row" style="margin-top:6px; justify-content:space-between">
+      <span class="muted" id="loadStatus">Model files are cached by the browser after the first download.</span>
+      <button class="chip" id="clearCache" title="Delete downloaded model files">Clear cache</button>
+    </div>
+    <p class="note" id="wasmNote" hidden>The CPU backend can only run the full-precision model (~3.3 GB). It is slow and may run out of memory; WebGPU (Chrome, Edge, or Safari 26+) is strongly recommended.</p>
+    <div class="files" id="fileList"></div>
+  </section>
+
+  <!-- 2. Voice -->
+  <section class="card">
+    <h2><span class="step" id="s2">2</span> Reference voice</h2>
+    <div class="drop" id="drop">
+      <div><strong>Drop an audio file</strong> or <button class="chip" id="pickBtn">browse</button> or <button class="chip" id="recBtn">● record</button></div>
+      <div class="small" style="margin-top:6px">5–15 seconds of one clear speaker works best. Longer clips are trimmed to 20 s.</div>
+      <input type="file" id="fileInput" accept="audio/*,video/*" hidden>
+    </div>
+    <div id="voiceInfo" style="margin-top:12px; display:none">
+      <div class="row" style="margin-bottom:6px"><span class="muted grow" id="voiceName"></span><span class="badge" id="voiceBadge">not encoded</span></div>
+      <audio id="voiceAudio" controls></audio>
+    </div>
+    <p class="note">Only clone voices you have permission to use.</p>
+  </section>
+
+  <!-- 3. Text -->
+  <section class="card">
+    <h2><span class="step" id="s3">3</span> Text</h2>
+    <textarea id="text">Oh, that's hilarious! [chuckle] Um, anyway — how are you doing today? I've been meaning to call you all week.</textarea>
+    <div class="row" style="margin-top:8px" id="tags"><span class="muted small">Insert:</span></div>
+    <details>
+      <summary>Advanced settings</summary>
+      <div class="adv">
+        <label class="f">Temperature <input type="number" id="temperature" value="0.8" min="0" max="2" step="0.05"></label>
+        <label class="f">Top-p <input type="number" id="topP" value="0.95" min="0.05" max="1" step="0.01"></label>
+        <label class="f">Top-k <input type="number" id="topK" value="1000" min="1" max="6563" step="1"></label>
+        <label class="f">Repetition penalty <input type="number" id="repPenalty" value="1.2" min="1" max="3" step="0.05"></label>
+        <label class="f">Max tokens / chunk <input type="number" id="maxTokens" value="1000" min="50" max="2000" step="50"></label>
+        <label class="f">Chunk size (chars) <input type="number" id="chunkChars" value="280" min="60" max="1000" step="20"></label>
+      </div>
+      <p class="muted small">Temperature 0 gives greedy decoding. Long text is split at sentence boundaries and stitched together.</p>
+    </details>
+    <div class="row" style="margin-top:14px">
+      <button id="genBtn" class="primary" disabled>Generate</button>
+      <button id="stopBtn" class="danger" disabled>Stop</button>
+      <span class="muted grow" id="genStatus"></span>
+    </div>
+    <div style="margin-top:10px" class="bar"><i id="genBar"></i></div>
+    <div id="outputs"></div>
+  </section>
+
+  <details>
+    <summary>Log</summary>
+    <div id="log"></div>
+  </details>
+
+  <footer>
+    Model: <a href="https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX" target="_blank" rel="noopener">ResembleAI/chatterbox-turbo-ONNX</a> (MIT) ·
+    Runtime: onnxruntime-web
+  </footer>
+</div>
+
+<script type="module">
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.29.0/dist/ort.webgpu.min.mjs';
+import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1/dist/transformers.min.js';
+
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.29.0/dist/';
+ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(8, navigator.hardwareConcurrency || 4) : 1;
+
+const MODEL_ID = 'ResembleAI/chatterbox-turbo-ONNX';
+const HF = `https://huggingface.co/${MODEL_ID}/resolve/main/`;
+const SAMPLE_RATE = 24000;
+const START_SPEECH_TOKEN = 6561;
+const STOP_SPEECH_TOKEN = 6562;
+const SILENCE_TOKEN = 4299;
+const NUM_LAYERS = 24, NUM_KV_HEADS = 16, HEAD_DIM = 64, HIDDEN = 1024;
+const MAX_REF_SECONDS = 20;
+const CACHE_NAME = 'doppel-models-v1';
+const COMPONENTS = ['speech_encoder', 'embed_tokens', 'language_model', 'conditional_decoder'];
+const DTYPE_SUFFIX = { fp32: '', fp16: '_fp16', q8: '_quantized', q4: '_q4', q4f16: '_q4f16' };
+// Per-component dtypes. The vocoder (conditional_decoder) always uses fp32 activations:
+// its fp16/q4f16 variants go silent partway through long outputs on WebGPU.
+// All quantized variants need GatherBlockQuantized, which the WASM backend lacks, so WASM is fp32-only.
+const PRECISIONS = {
+  q4f16: { label: 'q4f16 · ~640 MB', f16: true, dtypes: { speech_encoder: 'q4f16', embed_tokens: 'q4f16', language_model: 'q4f16', conditional_decoder: 'q4' } },
+  q4:    { label: 'q4 · ~720 MB',              dtypes: { speech_encoder: 'q4', embed_tokens: 'q4', language_model: 'q4', conditional_decoder: 'q4' } },
+  q8:    { label: 'q8 · ~1.1 GB',              dtypes: { speech_encoder: 'q8', embed_tokens: 'q8', language_model: 'q8', conditional_decoder: 'q8' } },
+  fp16:  { label: 'fp16 · ~2 GB',   f16: true, dtypes: { speech_encoder: 'fp16', embed_tokens: 'fp16', language_model: 'fp16', conditional_decoder: 'fp32' } },
+  fp32:  { label: 'fp32 · ~3.3 GB', wasm: true, dtypes: { speech_encoder: 'fp32', embed_tokens: 'fp32', language_model: 'fp32', conditional_decoder: 'fp32' } },
+};
+const kvTypeFor = (precision) => /f16|fp16/.test(PRECISIONS[precision].dtypes.language_model) ? 'float16' : 'float32';
+const TAGS = ['[laugh]', '[chuckle]', '[sigh]', '[gasp]', '[cough]', '[clear throat]', '[sniff]', '[groan]', '[shush]'];
+
+const $ = (id) => document.getElementById(id);
+const S = { sessions: null, tokenizer: null, precision: null, backend: null, voice: null, busy: false, abort: false, hasF16: false };
+
+// ---------- logging & helpers ----------
+function log(msg) {
+  const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  $('log').textContent += line;
+  $('log').scrollTop = $('log').scrollHeight;
+  console.log('[doppel]', msg);
+}
+const fmtMB = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB';
+const sleep0 = () => new Promise((r) => setTimeout(r, 0));
+
+// ---------- device detection ----------
+async function detectDevice() {
+  let adapter = null;
+  try { adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' }); } catch {}
+  S.hasF16 = !!adapter?.features?.has('shader-f16');
+  const sel = $('precision');
+  for (const [k, v] of Object.entries(PRECISIONS)) sel.add(new Option(v.label, k));
+  if (adapter) {
+    $('deviceBadge').textContent = S.hasF16 ? 'WebGPU · fp16' : 'WebGPU';
+    $('deviceBadge').className = 'badge ok';
+    $('backend').value = 'webgpu';
+    sel.value = S.hasF16 ? 'q4f16' : 'q4';
+  } else {
+    $('deviceBadge').textContent = 'CPU only';
+    $('deviceBadge').className = 'badge warn';
+    $('backend').value = 'wasm';
+    $('backend').options[0].disabled = true;
+  }
+  syncPrecisionOptions();
+  log(`WebGPU: ${adapter ? 'yes' : 'no'}, shader-f16: ${S.hasF16}, WASM threads: ${ort.env.wasm.numThreads}${self.crossOriginIsolated ? '' : ' (page is not cross-origin isolated)'}`);
+}
+function syncPrecisionOptions() {
+  const wasm = $('backend').value === 'wasm', sel = $('precision');
+  for (const opt of sel.options) opt.disabled = wasm && !PRECISIONS[opt.value].wasm;
+  if (sel.selectedOptions[0]?.disabled) sel.value = 'fp32';
+  $('wasmNote').hidden = !wasm;
+}
+
+// ---------- cached download ----------
+async function fetchCached(url, onProgress) {
+  let cache = null;
+  try { cache = await caches.open(CACHE_NAME); } catch {}
+  if (cache) {
+    const hit = await cache.match(url);
+    if (hit) {
+      const buf = new Uint8Array(await hit.arrayBuffer());
+      onProgress(buf.byteLength, buf.byteLength, true);
+      return buf;
+    }
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const total = +res.headers.get('content-length') || 0;
+  const reader = res.body.getReader();
+  let buf = total ? new Uint8Array(total) : null;
+  const chunks = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (buf && loaded + value.byteLength <= total) buf.set(value, loaded); else chunks.push(value);
+    loaded += value.byteLength;
+    onProgress(loaded, total || loaded, false);
+  }
+  if (!buf || loaded !== total) {
+    const merged = new Uint8Array(loaded);
+    let off = 0;
+    if (buf) { merged.set(buf.subarray(0, Math.min(loaded, total))); off = Math.min(loaded, total); }
+    for (const c of chunks) { merged.set(c, off); off += c.byteLength; }
+    buf = merged;
+  }
+  if (cache) {
+    try { await cache.put(url, new Response(buf, { headers: { 'content-type': 'application/octet-stream' } })); }
+    catch (e) { log(`Could not cache ${url.split('/').pop()}: ${e.message}`); }
+  }
+  return buf;
+}
+
+// ---------- model loading ----------
+async function loadModel() {
+  const precision = $('precision').value;
+  const backend = $('backend').value;
+  const P = PRECISIONS[precision];
+  if (backend === 'webgpu' && P.f16 && !S.hasF16) {
+    if (!confirm('Your GPU does not report shader-f16 support, so this precision may fail. Continue anyway?')) return;
+  }
+  setBusy(true);
+  $('loadBtn').disabled = true;
+  $('fileList').innerHTML = '';
+  $('s1').classList.remove('done');
+  try { await navigator.storage?.persist?.(); } catch {}
+
+  // release any previous model
+  if (S.sessions) { for (const s of Object.values(S.sessions)) try { await s.release(); } catch {} }
+  S.sessions = null; S.voice && (S.voice.encoded = null); updateVoiceBadge();
+
+  try {
+    $('loadStatus').textContent = 'Loading tokenizer…';
+    S.tokenizer ??= await AutoTokenizer.from_pretrained(MODEL_ID);
+
+    const fileOf = (c) => `${c}${DTYPE_SUFFIX[P.dtypes[c]]}.onnx`;
+    const files = COMPONENTS.flatMap((c) => [`onnx/${fileOf(c)}`, `onnx/${fileOf(c)}_data`]);
+    const prog = Object.fromEntries(files.map((f) => [f, { loaded: 0, total: 0 }]));
+    const rows = {};
+    for (const f of files) {
+      const name = document.createElement('span'); name.textContent = f.replace('onnx/', '');
+      const val = document.createElement('span'); val.textContent = '—';
+      $('fileList').append(name, val); rows[f] = val;
+    }
+    const render = () => {
+      let l = 0, t = 0;
+      for (const p of Object.values(prog)) { l += p.loaded; t += p.total; }
+      $('loadBar').style.width = t ? (100 * l / t).toFixed(1) + '%' : '0';
+      $('loadStatus').textContent = `Downloading ${fmtMB(l)}${t ? ' / ' + fmtMB(t) : ''}`;
+    };
+    const t0 = performance.now();
+    const bufs = await Promise.all(files.map((f) => fetchCached(HF + f, (loaded, total, cached) => {
+      prog[f] = { loaded, total };
+      rows[f].textContent = cached ? `cached · ${fmtMB(total)}` : `${fmtMB(loaded)} / ${fmtMB(total)}`;
+      render();
+    })));
+    log(`Fetched ${files.length} files in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+
+    const sessions = {};
+    for (let i = 0; i < COMPONENTS.length; i++) {
+      const comp = COMPONENTS[i];
+      const file = fileOf(comp);
+      $('loadStatus').textContent = `Initializing ${comp.replace('_', ' ')} (${i + 1}/${COMPONENTS.length})…`;
+      await sleep0();
+      sessions[comp] = await createSession(comp, file, bufs[i * 2], bufs[i * 2 + 1], backend);
+      bufs[i * 2] = bufs[i * 2 + 1] = null; // let GC reclaim the download
+    }
+    S.sessions = sessions; S.precision = precision; S.backend = backend;
+    $('loadBar').style.width = '100%';
+    $('loadStatus').textContent = `Ready · ${precision} on ${backend.toUpperCase()}`;
+    $('s1').classList.add('done');
+    log(`Model ready (${precision}, ${backend}) in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+  } catch (e) {
+    console.error(e);
+    log('Load failed: ' + (e.message || e));
+    $('loadStatus').textContent = 'Load failed: ' + (e.message || e);
+  } finally {
+    $('loadBtn').disabled = false;
+    setBusy(false);
+  }
+}
+
+async function createSession(comp, file, graph, data, backend) {
+  const make = (ep) => {
+    const opts = {
+      executionProviders: [ep],
+      graphOptimizationLevel: 'all',
+      externalData: [{ path: `${file}_data`, data }],
+    };
+    if (ep === 'webgpu' && comp === 'language_model') {
+      // Keep the KV cache on the GPU between decoding steps.
+      const loc = { logits: 'cpu' };
+      for (let l = 0; l < NUM_LAYERS; l++) { loc[`present.${l}.key`] = 'gpu-buffer'; loc[`present.${l}.value`] = 'gpu-buffer'; }
+      opts.preferredOutputLocation = loc;
+    }
+    return ort.InferenceSession.create(graph, opts);
+  };
+  try {
+    const s = await make(backend);
+    log(`${comp}: ${backend}`);
+    return s;
+  } catch (e) {
+    if (backend !== 'webgpu') throw e;
+    log(`${comp}: WebGPU failed (${e.message}); trying WASM`);
+    try { return await make('wasm'); } catch { throw e; }
+  }
+}
+
+// ---------- reference audio ----------
+async function decodeToMono24k(arrayBuffer) {
+  const ctx = new OfflineAudioContext(1, 1, SAMPLE_RATE);
+  const audio = await ctx.decodeAudioData(arrayBuffer);
+  const n = Math.min(audio.length, MAX_REF_SECONDS * audio.sampleRate);
+  const out = new Float32Array(n);
+  for (let c = 0; c < audio.numberOfChannels; c++) {
+    const ch = audio.getChannelData(c);
+    for (let i = 0; i < n; i++) out[i] += ch[i] / audio.numberOfChannels;
+  }
+  // Resample if the browser ignored the context rate.
+  if (audio.sampleRate !== SAMPLE_RATE) return resampleLinear(out, audio.sampleRate, SAMPLE_RATE);
+  return { samples: out, trimmed: audio.length > n, duration: audio.duration };
+}
+function resampleLinear(x, from, to) {
+  const n = Math.round(x.length * to / from), y = new Float32Array(n), r = from / to;
+  for (let i = 0; i < n; i++) { const p = i * r, j = Math.floor(p), f = p - j; y[i] = (x[j] ?? 0) * (1 - f) + (x[j + 1] ?? 0) * f; }
+  return { samples: y, trimmed: false, duration: n / to };
+}
+
+async function setVoice(blob, name) {
+  try {
+    const { samples, trimmed, duration } = await decodeToMono24k(await blob.arrayBuffer());
+    if (samples.length < SAMPLE_RATE * 2) throw new Error('Clip is shorter than 2 seconds.');
+    // Normalize very quiet recordings to a sensible peak.
+    let peak = 0; for (const v of samples) peak = Math.max(peak, Math.abs(v));
+    if (peak > 0 && peak < 0.5) { const g = 0.9 / peak; for (let i = 0; i < samples.length; i++) samples[i] *= g; }
+    S.voice = { samples, name, encoded: null };
+    $('voiceAudio').src = URL.createObjectURL(encodeWav(samples, SAMPLE_RATE));
+    $('voiceName').textContent = `${name} · ${(samples.length / SAMPLE_RATE).toFixed(1)} s${trimmed ? ` (trimmed from ${duration.toFixed(1)} s)` : ''}`;
+    $('voiceInfo').style.display = '';
+    $('s2').classList.add('done');
+    updateVoiceBadge();
+    log(`Voice set: ${name}, ${(samples.length / SAMPLE_RATE).toFixed(2)} s`);
+  } catch (e) {
+    log('Could not read audio: ' + e.message);
+    alert('Could not read that audio: ' + e.message);
+  }
+  refreshButtons();
+}
+function updateVoiceBadge() {
+  const b = $('voiceBadge');
+  if (S.voice?.encoded) { b.textContent = 'encoded'; b.className = 'badge ok'; }
+  else { b.textContent = 'not encoded'; b.className = 'badge'; }
+}
+
+async function encodeVoice() {
+  if (S.voice.encoded) return S.voice.encoded;
+  const t0 = performance.now();
+  const audio = new ort.Tensor('float32', S.voice.samples, [1, S.voice.samples.length]);
+  const out = await S.sessions.speech_encoder.run({ audio_values: audio });
+  S.voice.encoded = {
+    cond: out.audio_features,          // [1, m, 1024]
+    promptTokens: out.audio_tokens,     // [1, p] int64
+    spkEmb: out.speaker_embeddings,     // [1, 192]
+    spkFeat: out.speaker_features,      // [1, f, 80]
+  };
+  log(`Voice encoded in ${((performance.now() - t0) / 1000).toFixed(2)} s (${out.audio_tokens.dims[1]} prompt tokens)`);
+  updateVoiceBadge();
+  return S.voice.encoded;
+}
+
+// ---------- recording ----------
+let recorder = null, recTimer = null;
+async function toggleRecord() {
+  if (recorder) { recorder.stop(); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, channelCount: 1 } }); }
+  catch (e) { alert('Microphone unavailable: ' + e.message); return; }
+  const chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  recorder.onstop = async () => {
+    clearInterval(recTimer);
+    stream.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(chunks, { type: recorder.mimeType });
+    recorder = null;
+    $('recBtn').textContent = '● record';
+    await setVoice(blob, 'Recording');
+  };
+  recorder.start();
+  const t0 = Date.now();
+  const tick = () => {
+    const s = (Date.now() - t0) / 1000;
+    $('recBtn').innerHTML = `<span class="rec-dot"></span> stop · ${s.toFixed(0)} s`;
+    if (s >= MAX_REF_SECONDS) recorder?.stop();
+  };
+  tick(); recTimer = setInterval(tick, 250);
+}
+
+// ---------- text chunking ----------
+function chunkText(text, maxChars) {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const sentences = clean.match(/[^.!?…]+(?:[.!?…]+["')\]]*|$)\s*/g) || [clean];
+  const chunks = []; let cur = '';
+  for (let s of sentences) {
+    s = s.trim();
+    if (!s) continue;
+    // Very long sentences: split on commas/semicolons, then hard-wrap on spaces.
+    const parts = s.length > maxChars ? s.split(/(?<=[,;:—])\s+/) : [s];
+    for (let p of parts) {
+      while (p.length > maxChars) {
+        const cut = p.lastIndexOf(' ', maxChars) > 0 ? p.lastIndexOf(' ', maxChars) : maxChars;
+        if (cur) { chunks.push(cur); cur = ''; }
+        chunks.push(p.slice(0, cut).trim()); p = p.slice(cut).trim();
+      }
+      if (cur && (cur.length + 1 + p.length) > maxChars) { chunks.push(cur); cur = p; }
+      else cur = cur ? cur + ' ' + p : p;
+    }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
+// ---------- sampling ----------
+let sortIdx = null;
+function sampleToken(logits, seen, p) {
+  for (const t of seen) { const s = logits[t]; logits[t] = s < 0 ? s * p.repPenalty : s / p.repPenalty; }
+  const V = logits.length;
+  if (p.temperature <= 0) {
+    let best = 0; for (let i = 1; i < V; i++) if (logits[i] > logits[best]) best = i;
+    return best;
+  }
+  for (let i = 0; i < V; i++) logits[i] /= p.temperature;
+  if (!sortIdx || sortIdx.length !== V) sortIdx = new Uint32Array(V);
+  for (let i = 0; i < V; i++) sortIdx[i] = i;
+  sortIdx.sort((a, b) => logits[b] - logits[a]);
+  const k = Math.max(1, Math.min(p.topK | 0 || V, V));
+  const max = logits[sortIdx[0]];
+  const probs = new Float64Array(k); let sum = 0;
+  for (let i = 0; i < k; i++) { probs[i] = Math.exp(logits[sortIdx[i]] - max); sum += probs[i]; }
+  let keep = k, cum = 0;
+  for (let i = 0; i < k; i++) { cum += probs[i] / sum; if (cum >= p.topP) { keep = i + 1; break; } }
+  let kept = 0; for (let i = 0; i < keep; i++) kept += probs[i];
+  let r = Math.random() * kept;
+  for (let i = 0; i < keep; i++) { r -= probs[i]; if (r <= 0) return sortIdx[i]; }
+  return sortIdx[keep - 1];
+}
+
+// ---------- generation ----------
+const i64 = (arr, dims) => new ort.Tensor('int64', BigInt64Array.from(arr, BigInt), dims);
+
+async function synthesizeChunk(text, voice, params, onToken) {
+  const { embed_tokens: embed, language_model: lm, conditional_decoder: dec } = S.sessions;
+  const kvType = kvTypeFor(S.precision);
+  const ids = S.tokenizer.encode(text);
+
+  // Prefix: [voice conditioning embeddings | text embeddings]
+  const textEmb = (await embed.run({ input_ids: i64(ids, [1, ids.length]) })).inputs_embeds;
+  const m = voice.cond.dims[1], n = ids.length;
+  const prefix = new Float32Array((m + n) * HIDDEN);
+  prefix.set(voice.cond.data); prefix.set(textEmb.data, m * HIDDEN);
+  let inputsEmbeds = new ort.Tensor('float32', prefix, [1, m + n, HIDDEN]);
+  let seqLen = m + n, total = m + n;
+
+  let past = {};
+  for (let l = 0; l < NUM_LAYERS; l++) for (const kv of ['key', 'value']) {
+    past[`past_key_values.${l}.${kv}`] = new ort.Tensor(kvType, kvType === 'float16' ? new Uint16Array(0) : new Float32Array(0), [1, NUM_KV_HEADS, 0, HEAD_DIM]);
+  }
+  const disposePast = () => { for (const t of Object.values(past)) if (t.location === 'gpu-buffer') t.dispose(); };
+
+  const tokens = [];
+  const seen = new Set([START_SPEECH_TOKEN]);
+  try {
+    for (let step = 0; step < params.maxTokens; step++) {
+      if (S.abort) break;
+      const attention_mask = new ort.Tensor('int64', new BigInt64Array(total).fill(1n), [1, total]);
+      const position_ids = i64(Array.from({ length: seqLen }, (_, k) => total - seqLen + k), [1, seqLen]);
+      const out = await lm.run({ inputs_embeds: inputsEmbeds, attention_mask, position_ids, ...past });
+
+      const V = out.logits.dims[2];
+      const last = Float32Array.from(out.logits.data.subarray((seqLen - 1) * V, seqLen * V));
+      const next = sampleToken(last, seen, params);
+
+      disposePast();
+      past = {};
+      for (let l = 0; l < NUM_LAYERS; l++) for (const kv of ['key', 'value']) past[`past_key_values.${l}.${kv}`] = out[`present.${l}.${kv}`];
+
+      if (next === STOP_SPEECH_TOKEN) break;
+      tokens.push(next); seen.add(next);
+      onToken(tokens.length);
+
+      inputsEmbeds = (await embed.run({ input_ids: i64([next], [1, 1]) })).inputs_embeds;
+      seqLen = 1; total += 1;
+    }
+  } finally {
+    disposePast();
+  }
+  if (!tokens.length) return new Float32Array(0);
+
+  const prompt = voice.promptTokens.data;
+  const speech = new BigInt64Array(prompt.length + tokens.length + 3);
+  speech.set(prompt);
+  for (let i = 0; i < tokens.length; i++) speech[prompt.length + i] = BigInt(tokens[i]);
+  speech.fill(BigInt(SILENCE_TOKEN), prompt.length + tokens.length);
+
+  const wav = await dec.run({
+    speech_tokens: new ort.Tensor('int64', speech, [1, speech.length]),
+    speaker_embeddings: voice.spkEmb,
+    speaker_features: voice.spkFeat,
+  });
+  return Float32Array.from(wav.waveform.data);
+}
+
+async function generate() {
+  const text = $('text').value.trim();
+  if (!text || !S.sessions || !S.voice) return;
+  const params = {
+    temperature: +$('temperature').value,
+    topP: +$('topP').value || 1,
+    topK: +$('topK').value || 0,
+    repPenalty: +$('repPenalty').value || 1,
+    maxTokens: +$('maxTokens').value || 1000,
+  };
+  const chunks = chunkText(text, +$('chunkChars').value || 280);
+  S.abort = false;
+  setBusy(true);
+  $('stopBtn').disabled = false;
+  $('genBar').style.width = '0';
+  const t0 = performance.now();
+  try {
+    $('genStatus').textContent = 'Encoding reference voice…';
+    await sleep0();
+    const voice = await encodeVoice();
+
+    const pieces = [];
+    const gap = new Float32Array(Math.round(SAMPLE_RATE * 0.12));
+    for (let c = 0; c < chunks.length && !S.abort; c++) {
+      const tc = performance.now();
+      const audio = await synthesizeChunk(chunks[c], voice, params, (nTok) => {
+        const tps = nTok / ((performance.now() - tc) / 1000);
+        $('genStatus').textContent = `Chunk ${c + 1}/${chunks.length} · ${nTok} tokens · ${tps.toFixed(0)} tok/s`;
+        const est = Math.min(0.95, nTok / Math.max(40, chunks[c].length * 1.1));
+        $('genBar').style.width = (100 * (c + est) / chunks.length).toFixed(1) + '%';
+      });
+      if (audio.length) { if (pieces.length) pieces.push(gap); pieces.push(audio); }
+      $('genStatus').textContent = `Decoded chunk ${c + 1}/${chunks.length}`;
+      $('genBar').style.width = (100 * (c + 1) / chunks.length).toFixed(1) + '%';
+    }
+    const len = pieces.reduce((a, p) => a + p.length, 0);
+    if (!len) { $('genStatus').textContent = S.abort ? 'Stopped.' : 'No audio produced.'; return; }
+    const all = new Float32Array(len);
+    let off = 0; for (const p of pieces) { all.set(p, off); off += p.length; }
+    const secs = (performance.now() - t0) / 1000, dur = len / SAMPLE_RATE;
+    addOutput(text, all, dur, secs);
+    $('genStatus').textContent = `${S.abort ? 'Stopped early · ' : ''}${dur.toFixed(1)} s of audio in ${secs.toFixed(1)} s (${(dur / secs).toFixed(2)}× real-time)`;
+    log(`Generated ${dur.toFixed(2)} s audio in ${secs.toFixed(2)} s across ${chunks.length} chunk(s)`);
+  } catch (e) {
+    console.error(e);
+    log('Generation failed: ' + (e.message || e));
+    $('genStatus').textContent = 'Generation failed: ' + (e.message || e);
+  } finally {
+    setBusy(false);
+    $('stopBtn').disabled = true;
+  }
+}
+
+function addOutput(text, samples, dur, secs) {
+  const url = URL.createObjectURL(encodeWav(samples, SAMPLE_RATE));
+  const el = document.createElement('div');
+  el.className = 'out';
+  const p = document.createElement('p'); p.textContent = text.length > 220 ? text.slice(0, 220) + '…' : text;
+  const audio = document.createElement('audio'); audio.controls = true; audio.src = url;
+  const row = document.createElement('div'); row.className = 'row'; row.style.marginTop = '6px';
+  const meta = document.createElement('span'); meta.className = 'muted small grow';
+  meta.textContent = `${dur.toFixed(1)} s · ${S.voice.name} · ${S.precision}/${S.backend}`;
+  const dl = document.createElement('a'); dl.href = url; dl.download = `doppel-${Date.now()}.wav`;
+  const btn = document.createElement('button'); btn.className = 'chip'; btn.textContent = 'Download WAV'; dl.append(btn);
+  row.append(meta, dl);
+  el.append(p, audio, row);
+  $('outputs').prepend(el);
+  audio.play().catch(() => {});
+}
+
+// ---------- WAV encoding ----------
+function encodeWav(samples, sr) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) { const s = Math.max(-1, Math.min(1, samples[i])); v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+// ---------- UI wiring ----------
+function setBusy(b) { S.busy = b; refreshButtons(); }
+function refreshButtons() {
+  $('genBtn').disabled = S.busy || !S.sessions || !S.voice || !$('text').value.trim();
+  $('loadBtn').disabled = S.busy;
+  $('s3').classList.toggle('done', !!$('text').value.trim());
+}
+
+for (const t of TAGS) {
+  const b = document.createElement('button'); b.className = 'chip'; b.textContent = t;
+  b.onclick = () => {
+    const ta = $('text'), s = ta.selectionStart, e = ta.selectionEnd;
+    const pre = ta.value.slice(0, s), ins = (pre && !/\s$/.test(pre) ? ' ' : '') + t + ' ';
+    ta.value = pre + ins + ta.value.slice(e);
+    ta.focus(); ta.selectionStart = ta.selectionEnd = s + ins.length;
+    refreshButtons();
+  };
+  $('tags').append(b);
+}
+
+$('loadBtn').onclick = loadModel;
+$('backend').onchange = syncPrecisionOptions;
+$('genBtn').onclick = generate;
+$('stopBtn').onclick = () => { S.abort = true; $('stopBtn').disabled = true; };
+$('text').oninput = refreshButtons;
+$('pickBtn').onclick = () => $('fileInput').click();
+$('fileInput').onchange = (e) => { const f = e.target.files[0]; if (f) setVoice(f, f.name); e.target.value = ''; };
+$('recBtn').onclick = toggleRecord;
+$('clearCache').onclick = async () => {
+  if (!confirm('Delete all downloaded model files from this browser?')) return;
+  try { await caches.delete(CACHE_NAME); log('Model cache cleared'); $('loadStatus').textContent = 'Cache cleared.'; }
+  catch (e) { log('Could not clear cache: ' + e.message); }
+};
+const drop = $('drop');
+['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (f) setVoice(f, f.name); });
+
+if (!window.isSecureContext) log('Warning: not a secure context. Serve this page from https:// or http://localhost for WebGPU, caching and the microphone.');
+detectDevice();
+refreshButtons();
+</script>
+</body>
+</html>
