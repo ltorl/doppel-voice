@@ -26,8 +26,7 @@ No server, no uploads, no build step.
 
 ```
 doppel/
-├── index.html      Whole app: UI, inference loop, audio I/O
-└── banner.svg      This README's banner
+└── index.html      Whole app: UI, inference loop, audio I/O
 ```
 
 <br>
