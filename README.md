@@ -31,7 +31,7 @@ doppel/
 
 <br>
 
-## Link: https://ltorl.github.io/doppel-voice-cloning
+## Link: https://ltorl.github.io/doppel-voice
 
 <br>
 
