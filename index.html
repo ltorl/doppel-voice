@@ -1293,7 +1293,7 @@ function viewCreate(fromId) {
           h('audio', { id: 'refAudio', controls: true, preload: 'none', hidden: !C.base }),
           h('div', { class: 'muted small', id: 'refInfo', style: 'margin-top:4px' }, C.base ? 'Preparing…' : 'Add a clip on the left to hear it here.')),
         h('div', { class: 'sect' },
-          h('label', { class: 'f' }, h('span', null, 'Name ', h('span', { class: 'req' }, 'required')),
+          h('label', { class: 'f' }, h('span', null, 'Name ', h('span', { class: 'req' }, '')),
             h('input', { type: 'text', id: 'voiceNameInput', maxlength: 40, required: true, autocomplete: 'off', placeholder: 'Name your voice', value: C.name,
               oninput: (e) => { C.name = e.target.value; syncSave(); },
               onkeydown: (e) => { if (e.key === 'Enter') saveVoice(); } })),
