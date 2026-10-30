@@ -34,40 +34,6 @@ doppel/
 ## Link: https://ltorl.github.io/doppel-voice
 
 <br>
-
-<details>
-<summary><h2>Other ways to run it<h2></summary>
-
-Serve the folder from anywhere and open it in Chrome or Edge:
-
-```bash
-python3 -m http.server 8000
-```
-
-Then open **http://localhost:8000**.
-
-1. **Load the model**: about 640 MB the first time, then cached by the browser
-2. **Give it a voice**: drop a clip, pick a file, or record 5–15 seconds
-3. **Type, generate, download** a WAV
-
-<br>
-
-**Node**
-
-```bash
-npx serve .
-```
-
-**Static hosting**
-
-Drop `index.html` on GitHub Pages, Netlify, Cloudflare Pages, or any HTTPS host. Everything happens client-side.
-
-**Why not just double-click it?**
-
-`file://` pages aren't a secure context, so WebGPU, the model cache and the microphone are unavailable. Any `http://localhost` or `https://` origin works.
-
-</details>
-
 <br>
 <br>
 
@@ -105,6 +71,40 @@ Drop `index.html` on GitHub Pages, Netlify, Cloudflare Pages, or any HTTPS host.
 <br>
 <br>
 <br>
+
+<details>
+<summary><h2>Other ways to run it<h2></summary>
+
+Serve the folder from anywhere and open it in Chrome or Edge:
+
+```bash
+python3 -m http.server 8000
+```
+
+Then open **http://localhost:8000**.
+
+1. **Load the model**: about 640 MB the first time, then cached by the browser
+2. **Give it a voice**: drop a clip, pick a file, or record 5–15 seconds
+3. **Type, generate, download** a WAV
+
+<br>
+
+**Node**
+
+```bash
+npx serve .
+```
+
+**Static hosting**
+
+Drop `index.html` on GitHub Pages, Netlify, Cloudflare Pages, or any HTTPS host. Everything happens client-side.
+
+**Why not just double-click it?**
+
+`file://` pages aren't a secure context, so WebGPU, the model cache and the microphone are unavailable. Any `http://localhost` or `https://` origin works.
+
+</details>
+
 
 <details>
 <summary>
