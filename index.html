@@ -219,7 +219,11 @@ canvas.wave { width: 100%; height: 64px; display: block; cursor: pointer; }
 .takes { display: flex; flex-direction: column; gap: 4px; overflow: auto; min-height: 0; }
 .take { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; }
 .take:hover { background: var(--surface); }
-.take .txt { flex: 1; min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.take { cursor: pointer; }
+.take .txt { flex: 1; min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; border: 0; padding: 0; color: inherit; font-family: inherit; text-align: left; cursor: pointer; }
+.takes > * { flex: none; }
+.takes > .hero { margin: 4px 0; }
+.hero.fresh { animation: rise .18s ease-out; }
 .btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .emo {
   margin-top: 16px; padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; animation: rise .18s ease-out;
@@ -231,7 +235,7 @@ canvas.wave { width: 100%; height: 64px; display: block; cursor: pointer; }
 .syl-lane { display: flex; overflow-x: auto; padding: 2px 2px 8px; margin: 0 -2px; scrollbar-width: thin; }
 .syl {
   flex: none; min-width: 36px; padding: 4px 4px 3px; border: 1px solid transparent; border-radius: 8px; background: transparent;
-  color: var(--text); font: inherit; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: margin .15s;
+  color: var(--text); font: inherit; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: margin .15s, min-width .15s;
 }
 .syl.ws { margin-left: 8px; }
 .syl:hover { background: var(--surface-2); }
@@ -242,6 +246,15 @@ canvas.wave { width: 100%; height: 64px; display: block; cursor: pointer; }
 .syl .tick { position: absolute; left: 3px; right: 3px; height: 3px; margin-top: -1.5px; border-radius: 2px; background: var(--accent); transition: top .1s; }
 .syl .txt { font-size: 12.5px; text-align: center; white-space: nowrap; }
 .syl.changed .txt { color: var(--accent); font-weight: 600; }
+.split-dlg {
+  width: min(380px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
+  background: var(--bg); color: var(--text); box-shadow: 0 24px 80px rgba(0,0,0,.28); animation: rise .18s ease-out;
+}
+.split-dlg::backdrop { background: rgba(10,10,14,.42); backdrop-filter: blur(3px); animation: fade .15s ease-out; }
+.split-dlg form { display: flex; flex-direction: column; gap: 12px; }
+.split-dlg h3 { margin: 0; font-size: 15px; }
+.split-dlg p { margin: 0; }
+.split-dlg input { font-size: 18px; letter-spacing: .04em; }
 
 /* ---------- toast ---------- */
 .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 100; max-width: calc(100vw - 32px); }
@@ -425,6 +438,7 @@ const ICONS = {
   chevron: '<path d="M4 6l4 4 4-4"/>',
   emotion: '<path d="M2 8h1.5l1.5-4 2 8 2-10 2 9 1.5-3H14"/>',
   close: '<path d="M4 4l8 8M12 4l-8 8"/>',
+  split: '<path d="M8 1.5v13M5 5 2 8l3 3M11 5l3 3-3 3"/>',
 };
 const icon = (name) => {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1694,6 +1708,7 @@ function updateGenUI() {
   }
 }
 
+const OUT = { open: null, shown: null }; // open: id of the take shown expanded (falls back to the newest)
 async function renderOutputs(voiceId, playId) {
   const box = $('outputs');
   if (!box) return;
@@ -1707,40 +1722,42 @@ async function renderOutputs(voiceId, playId) {
       h('p', { class: 'small', style: 'margin:4px 0 0' }, 'Your audio shows up here, ready to download as MP3.'))));
     return;
   }
-  const [latest, ...rest] = takes;
+  if (playId) OUT.open = playId;
+  const cur = takes.find((t) => t.id === OUT.open) ?? takes[0];
+  const open = async (t) => { OUT.open = t.id; EMO.open = false; await renderOutputs(voiceId); $('outputs')?.querySelector('.hero .play')?.focus({ preventScroll: true }); };
+  const fresh = OUT.shown !== cur.id; OUT.shown = cur.id;
   const canvas = h('canvas', { class: 'wave' });
   const time = h('span', { class: 'time' });
   const tick = () => {
-    const prog = P.takeId === latest.id && P.audio.duration ? P.audio.currentTime / P.audio.duration : 0;
-    drawWave(canvas, latest.samples, prog);
-    time.textContent = `${fmtTime(P.takeId === latest.id ? P.audio.currentTime : 0)} / ${fmtTime(latest.duration)}`;
+    const prog = P.takeId === cur.id && P.audio.duration ? P.audio.currentTime / P.audio.duration : 0;
+    drawWave(canvas, cur.samples, prog);
+    time.textContent = `${fmtTime(P.takeId === cur.id ? P.audio.currentTime : 0)} / ${fmtTime(cur.duration)}`;
   };
-  canvas.addEventListener('click', (e) => seekTake(latest, e.offsetX / canvas.clientWidth));
-  const hero = h('div', { class: 'hero' },
+  canvas.addEventListener('click', (e) => seekTake(cur, e.offsetX / canvas.clientWidth));
+  const hero = h('div', { class: 'hero' + (fresh ? ' fresh' : '') },
     h('div', { class: 'wave-row' },
-      h('button', { class: 'play', 'data-play': latest.id, 'aria-label': 'Play', onclick: () => playTake(latest) }, icon('play')),
+      h('button', { class: 'play', 'data-play': cur.id, 'aria-label': 'Play', onclick: () => playTake(cur) }, icon('play')),
       h('div', { class: 'grow', style: 'min-width:0' }, canvas)),
-    h('p', null, latest.text),
+    h('p', null, cur.text),
     h('div', { class: 'row' },
       time,
-      h('span', { class: 'muted small grow' }, `${latest.partial ? 'stopped early · ' : ''}${new Date(latest.created).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`),
-      h('button', { class: 'btn primary sm', onclick: (e) => downloadMp3(latest, e.currentTarget) }, icon('download'), 'MP3'),
-      h('button', { class: 'btn sm', onclick: () => saveBlob(encodeWav(latest.samples, SAMPLE_RATE), takeFilename(latest, 'wav')) }, 'WAV'),
-      h('button', { class: 'btn sm', 'aria-expanded': String(EMO.open && EMO.takeId === latest.id), title: 'Adjust pitch, emphasis and spacing per syllable',
-        onclick: (e) => toggleEmotion(latest, e.currentTarget) }, icon('emotion'), 'Emotion'),
-      h('button', { class: 'btn sm icon ghost', 'aria-label': 'Delete take', title: 'Delete take', onclick: () => deleteTake(latest) }, icon('trash'))));
+      h('span', { class: 'muted small grow' }, `${cur.partial ? 'stopped early · ' : ''}${new Date(cur.created).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`),
+      h('button', { class: 'btn primary sm', onclick: (e) => downloadMp3(cur, e.currentTarget) }, icon('download'), 'MP3'),
+      h('button', { class: 'btn sm', onclick: () => saveBlob(encodeWav(cur.samples, SAMPLE_RATE), takeFilename(cur, 'wav')) }, 'WAV'),
+      h('button', { class: 'btn sm', 'aria-expanded': String(EMO.open && EMO.takeId === cur.id), title: 'Adjust pitch, emphasis and spacing per syllable',
+        onclick: (e) => toggleEmotion(cur, e.currentTarget) }, icon('emotion'), 'Emotion'),
+      h('button', { class: 'btn sm icon ghost', 'aria-label': 'Delete take', title: 'Delete take', onclick: () => deleteTake(cur) }, icon('trash'))));
   EMO.tick = null;
-  const emo = EMO.open && EMO.takeId === latest.id ? emotionPanel(latest) : null;
-  const list = rest.length ? h('div', { class: 'takes' },
-    h('div', { class: 'pane-label', style: 'margin:4px 0 2px' }, `Earlier takes · ${rest.length}`),
-    rest.map((t) => h('div', { class: 'take' },
-      h('button', { class: 'play sm', 'data-play': t.id, 'aria-label': 'Play', onclick: () => playTake(t) }, icon('play')),
-      h('span', { class: 'txt', title: t.text }, t.text),
-      h('span', { class: 'time' }, fmtTime(t.duration)),
-      h('button', { class: 'btn sm ghost', title: 'Download MP3', onclick: (e) => downloadMp3(t, e.currentTarget) }, icon('download'), 'MP3'),
-      h('button', { class: 'btn sm icon ghost', 'aria-label': 'Delete take', title: 'Delete take', onclick: () => deleteTake(t) }, icon('trash'))))) : null;
-  box.replaceChildren(...[hero, list].filter(Boolean));
+  const emo = EMO.open && EMO.takeId === cur.id ? emotionPanel(cur) : null;
+  const row = (t) => h('div', { class: 'take', onclick: (e) => { if (!e.target.closest('button')) open(t); } },
+    h('button', { class: 'play sm', 'data-play': t.id, 'aria-label': 'Play', onclick: () => playTake(t) }, icon('play')),
+    h('button', { class: 'txt', title: t.text, 'aria-label': 'Open take: ' + t.text, onclick: () => open(t) }, t.text),
+    h('span', { class: 'time' }, fmtTime(t.duration)),
+    h('button', { class: 'btn sm ghost', title: 'Download MP3', onclick: (e) => downloadMp3(t, e.currentTarget) }, icon('download'), 'MP3'),
+    h('button', { class: 'btn sm icon ghost', 'aria-label': 'Delete take', title: 'Delete take', onclick: () => deleteTake(t) }, icon('trash')));
+  box.replaceChildren(h('div', { class: 'takes' }, takes.map((t) => t === cur ? hero : row(t))));
   if (emo) $('emoSlot')?.replaceChildren(emo);
+  if (cur !== takes[0]) hero.scrollIntoView({ block: 'nearest' });
   P.onTick = () => { tick(); EMO.tick?.(); };
   requestAnimationFrame(P.onTick);
   P.ro?.disconnect();
@@ -1748,7 +1765,7 @@ async function renderOutputs(voiceId, playId) {
   P.ro.observe(canvas);
   if (emo) P.ro.observe(emo.querySelector('canvas'));
   syncPlayButtons();
-  if (playId === latest.id) playTake(latest);
+  if (playId === cur.id) playTake(cur);
 }
 function takeFilename(t, ext) {
   const v = S.voices.find((x) => x.id === t.voiceId);
@@ -1840,15 +1857,22 @@ function textSyllables(text) {
   return out;
 }
 
-// Each syllable carries pitch (semitones), gain (dB) and space (ms of pause after it; negative tightens the gap,
-// first out of the silence that's there, then by squeezing the syllable).
+// Each syllable carries pitch (semitones), emph (−100…100 % stress), stretch (× length of its sounded part, pitch kept)
+// and space (ms of pause after it; negative tightens the gap, first out of the silence that's there, then by squeezing the syllable).
+// Stress in speech is mostly a pitch accent plus length and a brighter tone, with loudness only a small part,
+// so emphasis drives all four together on top of the syllable's own pitch and stretch.
+const stressOf = (s) => {
+  const e = s.emph / 100, up = e > 0;
+  return { pitch: s.pitch + e * (up ? 3 : 1.5), gain: e * (up ? 4 : 7), tilt: e * (up ? 6 : 5), stretch: s.stretch * (1 + e * (up ? 0.3 : 0.15)) };
+};
 function renderEmotion(x, sr, sylls, track) {
-  if (!sylls.length || sylls.every((s) => !s.pitch && !s.gain && !s.space)) return x;
+  if (!sylls.length || sylls.every((s) => !s.pitch && !s.emph && !s.space && s.stretch === 1)) return x;
   const hop = Math.round(sr * 0.01), n = Math.ceil(x.length / hop) + 2, ms = sr / 1000, fade = Math.round(8 * ms);
+  const E = sylls.map((s) => ({ a: s.a, ...stressOf(s) }));
   // Per-frame curves, smoothed so changes glide across syllable boundaries instead of stepping.
   const curve = (key, radius) => {
-    const raw = new Float32Array(n).fill(sylls[0][key]);
-    for (const s of sylls) raw.fill(s[key], Math.floor(s.a / hop));
+    const raw = new Float32Array(n).fill(E[0][key]);
+    for (const s of E) raw.fill(s[key], Math.floor(s.a / hop));
     const c = new Float32Array(n);
     for (let f = 0; f < n; f++) {
       let sum = 0, k = 0; for (let j = Math.max(0, f - radius); j <= Math.min(n - 1, f + radius); j++) { sum += raw[j]; k++; }
@@ -1856,22 +1880,26 @@ function renderEmotion(x, sr, sylls, track) {
     }
     return (t) => { const p = Math.max(0, t / hop), j = Math.min(n - 2, p | 0), u = Math.min(1, p - j); return c[j] * (1 - u) + c[j + 1] * u; };
   };
-  const pitchAt = curve('pitch', 4), gainAt = curve('gain', 2);
+  const pitchAt = curve('pitch', 4), gainAt = curve('gain', 3), tiltAt = curve('tilt', 3);
 
   // Piecewise-linear map from output to input time; pauses hold still and get muted.
   const seg = [];
-  let o = 0, head = 0, squeezed = false;
+  let o = 0, head = 0, warped = false;
   const push = (i0, i1, len, pause = false) => { len = Math.round(len); if (len > 0) { seg.push({ o0: o, o1: o + len, i0, i1, pause }); o += len; } };
   push(0, sylls[0].a, sylls[0].a);
-  for (const s of sylls) {
+  sylls.forEach((s, j) => {
     const d = s.space * ms, [ql, qr] = s.quiet, room = Math.max(0, ql + qr - 20 * ms);
     const cut = d < 0 ? Math.min(-d, room) : 0, cutL = room ? cut * ql / (ql + qr) : 0;
     const i0 = s.a + head, i1 = s.b - cutL, len = Math.max(0.6 * (i1 - i0), i1 - i0 - (d < 0 ? -d - cut : 0));
-    if (len < i1 - i0 - 1) squeezed = true;
-    push(i0, i1, len);
+    // Stretch only the sounded core; the silence either side keeps its length (bar any squeeze).
+    const c0 = Math.max(i0, s.a + (j ? sylls[j - 1].quiet[1] : 0)), c1 = Math.max(c0, Math.min(i1, s.b - ql)), f = len / (i1 - i0);
+    if (len < i1 - i0 - 1 || E[j].stretch !== 1) warped = true;
+    push(i0, c0, (c0 - i0) * f);
+    push(c0, c1, (c1 - c0) * f * E[j].stretch);
+    push(c1, i1, (i1 - c1) * f);
     if (d > 0) push(i1, i1, d, true);
     head = cut - cutL;
-  }
+  });
   const end = sylls[sylls.length - 1].b + head;
   push(end, x.length, x.length - end);
   let k = 0;
@@ -1882,36 +1910,80 @@ function renderEmotion(x, sr, sylls, track) {
     return s.i0 + (s.i1 - s.i0) * Math.min(1, Math.max(0, (t - s.o0) / (s.o1 - s.o0)));
   };
 
-  const y = squeezed || sylls.some((s) => s.pitch)
+  const y = warped || E.some((s) => s.pitch)
     ? psola(x, sr, 1, 1, { pitchAt: (ta) => 2 ** (pitchAt(ta) / 12), warp: { len: o, at }, track }) : null;
   const out = new Float32Array(o);
-  let peak = 0;
+  // Tilt is a high shelf: the treble above ~1.5 kHz (a one-pole high-pass) is mixed back in at ±tilt dB.
+  const alpha = 1 / (1 + 2 * Math.PI * 1500 / sr);
+  let peak = 0, hp = 0, prev = 0;
   for (const s of seg) for (let t = s.o0; t < s.o1; t++) {
     const ti = s.i0 + (s.i1 - s.i0) * (t - s.o0) / (s.o1 - s.o0), j = ti | 0;
     let v = y ? y[t] : (x[j] ?? 0) + ((x[j + 1] ?? 0) - (x[j] ?? 0)) * (ti - j);
     if (s.pause) v *= Math.max(0, 1 - (t - s.o0) / fade, 1 - (s.o1 - t) / fade);
+    hp = alpha * (hp + v - prev); prev = v;
+    v += (10 ** (tiltAt(ti) / 20) - 1) * hp;
     out[t] = v *= 10 ** (gainAt(ti) / 20);
     peak = Math.max(peak, Math.abs(v));
   }
   return peak > 0.99 ? normalizePeak(out, 0.97) : out;
 }
 
+// Splits syllable i into the given pieces of text. Each cut starts at the letter-proportional point of the
+// sounded part and slides to the quietest 10 ms nearby, so it tends to land between sounds.
+function splitSyllable(x, sr, ss, i, parts) {
+  const s = ss[i], hop = Math.round(sr * 0.01), min = Math.round(sr * 0.03), total = parts.join('').length;
+  const c0 = s.a + (i ? ss[i - 1].quiet[1] : 0), c1 = Math.max(c0 + 1, s.b - s.quiet[0]), per = (c1 - c0) / total;
+  const energy = (t) => { let e = 0; for (let j = Math.max(0, t - hop / 2 | 0), end = Math.min(x.length, j + hop); j < end; j++) e += x[j] * x[j]; return e; };
+  const peakDb = (a, b) => { let m = 1e-10; for (let t = a; t + hop <= b; t += hop) m = Math.max(m, energy(t + hop / 2)); return 10 * Math.log10(m / hop); };
+  const bounds = [s.a];
+  let acc = 0;
+  parts.slice(0, -1).forEach((p, k) => {
+    acc += p.length;
+    const want = c0 + per * acc, reach = per * Math.min(p.length, parts[k + 1].length) * 0.5;
+    const lo = Math.max(bounds[k] + min, want - reach), hi = Math.min(s.b - min * (parts.length - 1 - k), want + reach);
+    let best = Math.round(Math.min(Math.max(want, bounds[k] + 1), s.b - (parts.length - 1 - k))), score = Infinity;
+    for (let t = Math.round(lo); t <= hi; t += hop / 2 | 0) {
+      const v = energy(t) * (1 + 0.5 * ((t - want) / (reach || 1)) ** 2);
+      if (v < score) { score = v; best = t; }
+    }
+    bounds.push(best);
+  });
+  bounds.push(s.b);
+  const whole = peakDb(s.a, s.b), last = parts.length - 1;
+  return parts.map((label, k) => ({
+    ...s, label, a: bounds[k], b: bounds[k + 1], lvl: s.lvl + peakDb(bounds[k], bounds[k + 1]) - whole,
+    ws: k ? false : s.ws, quiet: k === last ? s.quiet : [0, 0], space: k === last ? s.space : 0,
+  }));
+}
+
+// A small modal asking where to cut the syllable's text; calls back with the pieces.
+function splitDialog(label, onSplit) {
+  const input = h('input', { type: 'text', value: label, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Syllable text' });
+  const ok = h('button', { class: 'btn primary sm', type: 'submit' }, icon('split'), 'Split');
+  const parts = () => input.value.trim().split(/\s+/).filter(Boolean);
+  const check = () => { ok.disabled = parts().length < 2; };
+  input.addEventListener('input', check);
+  const dlg = h('dialog', { class: 'split-dlg', 'aria-labelledby': 'split-title', onclose: () => dlg.remove() },
+    h('form', { method: 'dialog', onsubmit: (e) => { const p = parts(); if (p.length < 2) e.preventDefault(); else onSplit(p); } },
+      h('h3', { id: 'split-title' }, 'Split syllable'),
+      h('p', { class: 'muted small' }, 'Type a space where the split goes. Each piece becomes its own syllable.'),
+      input,
+      h('div', { class: 'row' }, h('span', { class: 'grow' }),
+        h('button', { class: 'btn sm ghost', type: 'button', onclick: () => dlg.close() }, 'Cancel'), ok)));
+  document.body.append(dlg);
+  check(); dlg.showModal();
+  const mid = Math.ceil(label.length / 2);
+  input.focus(); input.setSelectionRange(mid, mid);
+}
+
 // One editor at a time, bound to the newest take, so edits survive re-renders of the outputs pane.
 const EMO = { takeId: null, open: false, sylls: [], sel: [0, 0], anchor: 0, track: null, out: null, timer: 0, tick: null };
 const EMO_FIELDS = [
   { k: 'pitch', label: 'Pitch', min: -12, max: 12, step: 0.5, fmt: signed(' st'), hint: 'Raise or lower the syllable' },
-  { k: 'gain', label: 'Emphasis', min: -18, max: 12, step: 1, fmt: signed(' dB'), hint: 'Louder to stress it, quieter to throw it away' },
+  { k: 'emph', label: 'Emphasis', min: -100, max: 100, step: 5, fmt: signed('%'), hint: 'Stress the syllable (higher, longer, brighter, a little louder) or throw it away' },
+  { k: 'stretch', label: 'Stretch', min: 0.5, max: 3, step: 0.05, fmt: (v) => `${(+v).toFixed(2)}×`, hint: 'Draw the syllable out (or clip it) without changing its pitch' },
   { k: 'space', label: 'Spacing', min: -300, max: 800, step: 10, fmt: signed(' ms'), hint: 'Pause after the syllable; negative tightens the gap' },
 ];
-// (index, count, stressed) → [pitch, gain, space]. Spacing only lands where a word ends.
-const EMO_PRESETS = {
-  Neutral: () => [0, 0, 0],
-  Excited: (i, n, st) => [st ? 5 : 3, st ? 5 : 2, -40],
-  Calm: (i, n, st) => [-1, st ? -1 : -3, 80],
-  Sad: (i, n) => [-2 - 3 * i / Math.max(1, n - 1), -4, 160],
-  Angry: (i, n, st) => [st ? 1 : -1.5, st ? 7 : 3, -30],
-  Question: (i, n) => [Math.max(0, 2 * (i - n + 4)), 0, 0],
-};
 
 async function toggleEmotion(t, btn) {
   if (EMO.open && EMO.takeId === t.id) { EMO.open = false; return renderOutputs(t.voiceId); }
@@ -1920,15 +1992,14 @@ async function toggleEmotion(t, btn) {
     const words = textSyllables(t.text);
     const sylls = findSyllables(t.samples, SAMPLE_RATE, t.partial ? 0 : words.length);
     if (!sylls.length) { toast('No syllables found in this take.', true); return renderOutputs(t.voiceId); }
-    const M = words.length, N = sylls.length, med = sylls.map((s) => s.lvl).sort((a, b) => a - b)[N >> 1];
+    const M = words.length, N = sylls.length;
     sylls.forEach((s, j) => {
       const from = Math.floor(j * M / N), to = Math.max(from + 1, Math.floor((j + 1) * M / N));
       const part = words.slice(from, Math.min(M, to));
       Object.assign(s, {
         label: part.map((w) => w.s).join('') || String(j + 1),
         ws: j > 0 && !!part[0]?.first,
-        brk: part.length ? part[part.length - 1].last : s.quiet[1] > 0,
-        stressed: s.lvl > med, pitch: 0, gain: 0, space: 0,
+        pitch: 0, emph: 0, space: 0, stretch: 1,
       });
     });
     Object.assign(EMO, { takeId: t.id, sylls, sel: [0, 0], anchor: 0, track: trackPitch(t.samples, SAMPLE_RATE), out: null });
@@ -1961,7 +2032,7 @@ async function saveEmotion(t) {
   const take = { ...t, id: uid(), created: Date.now(), samples, duration: samples.length / SAMPLE_RATE, emotion: true };
   try { await dbPut('takes', take); await pruneTakes(t.voiceId); }
   catch (e) { mem.takes.set(take.id, take); toast('Could not save this take to browser storage (' + e.message + ').', true); }
-  EMO.open = false;
+  EMO.open = false; OUT.open = take.id;
   toast('Saved the edited take.');
   await renderOutputs(t.voiceId);
 }
@@ -1985,6 +2056,17 @@ function emotionPanel(t) {
       if (d) { e.preventDefault(); select((e.shiftKey ? (EMO.sel[0] < EMO.anchor ? EMO.sel[0] : EMO.sel[1]) : EMO.sel[d > 0 ? 1 : 0]) + d, e.shiftKey); }
     } }, cells);
   const what = h('span', { class: 'small grow' });
+  const splitBtn = h('button', { class: 'btn sm ghost', title: 'Split the selected syllable in two', onclick: () => {
+    const i = EMO.sel[0];
+    splitDialog(ss[i].label, async (parts) => {
+      const pieces = splitSyllable(t.samples, SAMPLE_RATE, ss, i, parts);
+      ss.splice(i, 1, ...pieces);
+      EMO.anchor = i; EMO.sel = [i, i + pieces.length - 1];
+      await renderOutputs(t.voiceId);
+      emoChanged(t);
+      $('emo')?.querySelectorAll('.syl')[i]?.focus({ preventScroll: true });
+    });
+  } }, icon('split'), 'Split');
   const sliders = h('div', { class: 'sgroup' });
   const inputs = EMO_FIELDS.map((f) => {
     const out = h('output', { id: 'emo-out-' + f.k });
@@ -1993,10 +2075,6 @@ function emotionPanel(t) {
     sliders.append(h('label', { for: 'emo-' + f.k, title: f.hint }, f.label), input, out);
     return { f, input, out };
   });
-  const presets = Object.keys(EMO_PRESETS).map((name) => h('button', { class: 'chip', onclick: () => {
-    ss.forEach((s, i) => { [s.pitch, s.gain, s.space] = EMO_PRESETS[name](i, n, s.stressed); if (!s.brk) s.space = Math.min(0, s.space); });
-    update(); emoChanged(t);
-  } }, name));
   const canvas = h('canvas', { class: 'wave', onclick: (e) => seekTake(emoOut(t), e.offsetX / canvas.clientWidth) });
   const time = h('span', { class: 'time' });
 
@@ -2004,12 +2082,15 @@ function emotionPanel(t) {
     ss.forEach((s, i) => {
       const c = cells[i], on = i >= EMO.sel[0] && i <= EMO.sel[1];
       c.setAttribute('aria-pressed', String(on));
-      c.classList.toggle('changed', !!(s.pitch || s.gain || s.space));
+      const st = stressOf(s);
+      c.classList.toggle('changed', !!(s.pitch || s.emph || s.space || s.stretch !== 1));
+      c.style.minWidth = Math.round(36 * st.stretch) + 'px';
       c.style.marginRight = (2 + Math.max(0, s.space) / 20) + 'px';
-      c.querySelector('.lvl').style.height = Math.min(100, Math.max(4, (s.lvl + s.gain + 26) / 28 * 100)) + '%';
-      c.querySelector('.tick').style.top = (50 - s.pitch / 12 * 42) + '%';
+      c.querySelector('.lvl').style.height = Math.min(100, Math.max(4, (s.lvl + st.gain + st.tilt / 2 + 26) / 28 * 100)) + '%';
+      c.querySelector('.tick').style.top = (50 - st.pitch / 12 * 42) + '%';
     });
     const picked = sel();
+    splitBtn.disabled = picked.length > 1 || picked[0].label.length < 2 || picked[0].b - picked[0].a < SAMPLE_RATE * 0.06;
     what.textContent = picked.length > 1 ? `${picked.length} syllables · ${picked.map((s, i) => (i && s.ws ? ' ' : '') + s.label).join('')}`.slice(0, 60) : `“${picked[0].label}”`;
     for (const { f, input, out } of inputs) {
       const vals = picked.map((s) => s[f.k]), same = vals.every((v) => v === vals[0]);
@@ -2026,13 +2107,12 @@ function emotionPanel(t) {
     h('div', { class: 'row' },
       h('span', { class: 'pane-label grow' }, icon('emotion'), 'Emotion'),
       h('button', { class: 'btn sm icon ghost', 'aria-label': 'Close emotion editor', title: 'Close', onclick: () => toggleEmotion(t) }, icon('close'))),
-    h('div', { class: 'tags' }, presets),
     lane,
     h('div', { class: 'row' }, what,
       h('button', { class: 'btn sm ghost', onclick: () => { EMO.anchor = 0; EMO.sel = [0, n - 1]; update(); } }, 'Select all'),
-      h('button', { class: 'btn sm ghost', onclick: () => { for (const s of sel()) s.pitch = s.gain = s.space = 0; update(); emoChanged(t); } }, icon('reset'), 'Reset')),
+      splitBtn,
+      h('button', { class: 'btn sm ghost', onclick: () => { for (const s of sel()) { s.pitch = s.emph = s.space = 0; s.stretch = 1; } update(); emoChanged(t); } }, icon('reset'), 'Reset')),
     sliders,
-    h('p', { class: 'muted small', style: 'margin:0' }, 'Bar = emphasis, line = pitch, gap = spacing. Shift-click or shift-arrow to edit a run of syllables. Syllables are found in the audio, so labels are a best guess.'),
     h('div', { class: 'wave-row' },
       h('button', { class: 'play sm', 'data-play': t.id + '~emo', 'aria-label': 'Play', onclick: () => playTake(emoOut(t)) }, icon('play')),
       h('div', { class: 'grow', style: 'min-width:0' }, canvas)),
