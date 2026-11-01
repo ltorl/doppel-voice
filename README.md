@@ -50,7 +50,6 @@ doppel/
 - **Long text**: split at sentence boundaries and stitched back together
 - **Live progress**: tokens per second, chunk count, real-time factor
 - **History**: every take gets a player and a **WAV download**
-- **Light and dark** themes that follow your system
 <br>
 </td>
 <td width="50%" valign="top">
@@ -62,7 +61,6 @@ doppel/
 - Five precisions from **q4f16 (~640 MB)** to **fp32 (~3.3 GB)**
 - Voice is **encoded once** and reused for every chunk and take
 - Model files are **cached** with the Cache API, so reloads take seconds
-- About **real-time speed** on an Apple-silicon laptop
 
 </td>
 </tr>
