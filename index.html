@@ -231,7 +231,10 @@ canvas.wave { width: 100%; height: 64px; display: block; cursor: pointer; }
 }
 .emo .wave-row { display: flex; align-items: center; gap: 10px; }
 .emo canvas.wave { height: 40px; }
-.emo .sgroup { font-size: 13.5px; max-width: 640px; }
+.emo .sliders { gap: 18px 32px; }
+.emo .sgroup { grid-template-columns: 96px minmax(0, 1fr) minmax(58px, auto); }
+.emo output { white-space: nowrap; }
+.emo .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .syl-lane { display: flex; overflow-x: auto; padding: 2px 2px 8px; margin: 0 -2px; scrollbar-width: thin; }
 .syl {
   flex: none; min-width: 36px; padding: 4px 4px 3px; border: 1px solid transparent; border-radius: 8px; background: transparent;
@@ -246,6 +249,7 @@ canvas.wave { width: 100%; height: 64px; display: block; cursor: pointer; }
 .syl .tick { position: absolute; left: 3px; right: 3px; height: 3px; margin-top: -1.5px; border-radius: 2px; background: var(--accent); transition: top .1s; }
 .syl .txt { font-size: 12.5px; text-align: center; white-space: nowrap; }
 .syl.changed .txt { color: var(--accent); font-weight: 600; }
+.syl.trem .tick { background: repeating-linear-gradient(90deg, var(--accent) 0 3px, transparent 3px 5px); }
 .split-dlg {
   width: min(380px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
   background: var(--bg); color: var(--text); box-shadow: 0 24px 80px rgba(0,0,0,.28); animation: rise .18s ease-out;
@@ -439,6 +443,8 @@ const ICONS = {
   emotion: '<path d="M2 8h1.5l1.5-4 2 8 2-10 2 9 1.5-3H14"/>',
   close: '<path d="M4 4l8 8M12 4l-8 8"/>',
   split: '<path d="M8 1.5v13M5 5 2 8l3 3M11 5l3 3-3 3"/>',
+  undo: '<path d="M5.5 3.5 2.5 6.5l3 3M2.5 6.5H10a3.5 3.5 0 0 1 0 7H8"/>',
+  redo: '<path d="m10.5 3.5 3 3-3 3M13.5 6.5H6a3.5 3.5 0 0 0 0 7h2"/>',
 };
 const icon = (name) => {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1010,7 +1016,7 @@ function trackPitch(x, sr) {
 
 // expr scales the intonation around the median pitch: -1 is monotone, +1 doubles the swings (in log pitch).
 // vibrato is a sine pitch wobble (depth in cents, vibRate in Hz); rough (0–1) jitters each period's length and loudness.
-// pitchAt(inputSample) multiplies the pitch over time; warp { len, at(outputSample) → inputSample } replaces timeFactor.
+// pitchAt(inputSample, outputSample) multiplies the pitch over time; warp { len, at(outputSample) → inputSample } replaces timeFactor.
 function psola(x, sr, pitchFactor, timeFactor, { expr = 0, vibrato = 0, vibRate = 5.5, rough = 0, pitchAt = null, warp = null, track = null } = {}) {
   const { periods, hop } = track || trackPitch(x, sr);
   const voicedP = Array.from(periods).filter(Boolean).sort((a, b) => a - b);
@@ -1018,7 +1024,7 @@ function psola(x, sr, pitchFactor, timeFactor, { expr = 0, vibrato = 0, vibRate 
   const factorAt = (T, ts, ta) => {
     let f = !expr || !medT ? pitchFactor : pitchFactor * Math.min(2, Math.max(0.5, (medT / T) ** expr));
     if (vibrato) f *= 2 ** (vibrato / 1200 * Math.sin(2 * Math.PI * vibRate * ts / sr));
-    if (pitchAt) f *= pitchAt(ta);
+    if (pitchAt) f *= pitchAt(ta, ts);
     return f;
   };
   const jitter = (amount) => 1 + amount * (Math.random() * 2 - 1);
@@ -1857,22 +1863,29 @@ function textSyllables(text) {
   return out;
 }
 
-// Each syllable carries pitch (semitones), emph (−100…100 % stress), stretch (× length of its sounded part, pitch kept)
-// and space (ms of pause after it; negative tightens the gap, first out of the silence that's there, then by squeezing the syllable).
+// Each syllable carries pitch (semitones), glide (semitones the pitch bends by across it), range (−100…100 % of its
+// intonation swing), tremble (0…100 % shake), emph (−100…100 % stress), gain (dB), tilt (dB of treble), stretch
+// (× length of its sounded part, pitch kept) and space (ms of pause after it; negative tightens the gap, first out of
+// the silence that's there, then by squeezing the syllable).
 // Stress in speech is mostly a pitch accent plus length and a brighter tone, with loudness only a small part,
-// so emphasis drives all four together on top of the syllable's own pitch and stretch.
+// so emphasis drives all four together on top of the syllable's own pitch, gain, tilt and stretch.
 const stressOf = (s) => {
   const e = s.emph / 100, up = e > 0;
-  return { pitch: s.pitch + e * (up ? 3 : 1.5), gain: e * (up ? 4 : 7), tilt: e * (up ? 6 : 5), stretch: s.stretch * (1 + e * (up ? 0.3 : 0.15)) };
+  return { pitch: s.pitch + e * (up ? 3 : 1.5), gain: s.gain + e * (up ? 4 : 7), tilt: s.tilt + e * (up ? 6 : 5), stretch: s.stretch * (1 + e * (up ? 0.3 : 0.15)) };
 };
+const isNeutral = (s) => EMO_FIELDS.every((f) => s[f.k] === f.def);
 function renderEmotion(x, sr, sylls, track) {
-  if (!sylls.length || sylls.every((s) => !s.pitch && !s.emph && !s.space && s.stretch === 1)) return x;
+  if (!sylls.length || sylls.every(isNeutral)) return x;
+  track ||= trackPitch(x, sr);
   const hop = Math.round(sr * 0.01), n = Math.ceil(x.length / hop) + 2, ms = sr / 1000, fade = Math.round(8 * ms);
-  const E = sylls.map((s) => ({ a: s.a, ...stressOf(s) }));
-  // Per-frame curves, smoothed so changes glide across syllable boundaries instead of stepping.
-  const curve = (key, radius) => {
-    const raw = new Float32Array(n).fill(E[0][key]);
-    for (const s of E) raw.fill(s[key], Math.floor(s.a / hop));
+  const E = sylls.map((s, j) => {
+    const c0 = s.a + (j ? sylls[j - 1].quiet[1] : 0);
+    return { ...s, ...stressOf(s), c0, c1: Math.max(c0 + 1, s.b - s.quiet[0]) };
+  });
+  // Per-frame curves of fn(syllable, inputSample), smoothed so changes glide across syllable boundaries instead of stepping.
+  const curve = (fn, radius) => {
+    const raw = new Float32Array(n);
+    for (let f = 0, j = 0; f < n; f++) { while (j < E.length - 1 && E[j + 1].a <= f * hop) j++; raw[f] = fn(E[j], f * hop); }
     const c = new Float32Array(n);
     for (let f = 0; f < n; f++) {
       let sum = 0, k = 0; for (let j = Math.max(0, f - radius); j <= Math.min(n - 1, f + radius); j++) { sum += raw[j]; k++; }
@@ -1880,7 +1893,20 @@ function renderEmotion(x, sr, sylls, track) {
     }
     return (t) => { const p = Math.max(0, t / hop), j = Math.min(n - 2, p | 0), u = Math.min(1, p - j); return c[j] * (1 - u) + c[j + 1] * u; };
   };
-  const pitchAt = curve('pitch', 4), gainAt = curve('gain', 3), tiltAt = curve('tilt', 3);
+  // Glide bends the pitch across the sounded core, from the syllable's own pitch to pitch + glide.
+  const semis = curve((s, t) => s.pitch + s.glide * Math.min(1, Math.max(0, (t - s.c0) / (s.c1 - s.c0))), 4);
+  const gainAt = curve((s) => s.gain, 3), tiltAt = curve((s) => s.tilt, 3);
+  const rangeAt = curve((s) => s.range / 100, 4), trembleAt = curve((s) => s.tremble / 100, 4);
+  // Range scales how far the pitch strays from the take's median, like psola's expr. Tremble is a 6 Hz waver of up to
+  // ±80 cents and ±3 dB, timed on the output so stretching doesn't slow it down.
+  const { periods } = track, voicedP = Array.from(periods).filter(Boolean).sort((a, b) => a - b);
+  const medT = voicedP.length ? voicedP[voicedP.length >> 1] : 0;
+  const rangeFactor = (ta) => {
+    const r = rangeAt(ta), T = r && medT ? periods[Math.min(periods.length - 1, Math.round(ta / track.hop))] : 0;
+    return T ? Math.min(2, Math.max(0.5, (medT / T) ** r)) : 1;
+  };
+  const wobble = (t) => Math.sin(2 * Math.PI * 6 * t / sr);
+  const pitchAt = (ta, ts) => 2 ** ((semis(ta) + 0.8 * trembleAt(ta) * wobble(ts)) / 12) * rangeFactor(ta);
 
   // Piecewise-linear map from output to input time; pauses hold still and get muted.
   const seg = [];
@@ -1910,8 +1936,8 @@ function renderEmotion(x, sr, sylls, track) {
     return s.i0 + (s.i1 - s.i0) * Math.min(1, Math.max(0, (t - s.o0) / (s.o1 - s.o0)));
   };
 
-  const y = warped || E.some((s) => s.pitch)
-    ? psola(x, sr, 1, 1, { pitchAt: (ta) => 2 ** (pitchAt(ta) / 12), warp: { len: o, at }, track }) : null;
+  const y = warped || E.some((s) => s.pitch || s.glide || s.range || s.tremble)
+    ? psola(x, sr, 1, 1, { pitchAt, warp: { len: o, at }, track }) : null;
   const out = new Float32Array(o);
   // Tilt is a high shelf: the treble above ~1.5 kHz (a one-pole high-pass) is mixed back in at ±tilt dB.
   const alpha = 1 / (1 + 2 * Math.PI * 1500 / sr);
@@ -1922,7 +1948,7 @@ function renderEmotion(x, sr, sylls, track) {
     if (s.pause) v *= Math.max(0, 1 - (t - s.o0) / fade, 1 - (s.o1 - t) / fade);
     hp = alpha * (hp + v - prev); prev = v;
     v += (10 ** (tiltAt(ti) / 20) - 1) * hp;
-    out[t] = v *= 10 ** (gainAt(ti) / 20);
+    out[t] = v *= 10 ** ((gainAt(ti) + 3 * trembleAt(ti) * wobble(t)) / 20);
     peak = Math.max(peak, Math.abs(v));
   }
   return peak > 0.99 ? normalizePeak(out, 0.97) : out;
@@ -1977,12 +2003,23 @@ function splitDialog(label, onSplit) {
 }
 
 // One editor at a time, bound to the newest take, so edits survive re-renders of the outputs pane.
-const EMO = { takeId: null, open: false, sylls: [], sel: [0, 0], anchor: 0, track: null, out: null, timer: 0, tick: null };
+// ramp spreads slider moves over a multi-syllable selection: 0 evenly, 1 building toward the end, -1 fading out.
+const EMO = { takeId: null, open: false, sylls: [], sel: [0, 0], anchor: 0, ramp: 0, undo: [], redo: [], track: null, out: null, timer: 0, tick: null };
 const EMO_FIELDS = [
-  { k: 'pitch', label: 'Pitch', min: -12, max: 12, step: 0.5, fmt: signed(' st'), hint: 'Raise or lower the syllable' },
-  { k: 'emph', label: 'Emphasis', min: -100, max: 100, step: 5, fmt: signed('%'), hint: 'Stress the syllable (higher, longer, brighter, a little louder) or throw it away' },
-  { k: 'stretch', label: 'Stretch', min: 0.5, max: 3, step: 0.05, fmt: (v) => `${(+v).toFixed(2)}×`, hint: 'Draw the syllable out (or clip it) without changing its pitch' },
-  { k: 'space', label: 'Spacing', min: -300, max: 800, step: 10, fmt: signed(' ms'), hint: 'Pause after the syllable; negative tightens the gap' },
+  { k: 'pitch', group: 'Pitch', label: 'Pitch', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'Raise or lower the syllable' },
+  { k: 'glide', group: 'Pitch', label: 'Glide', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'Bend the pitch through the syllable: up for a questioning lift, down for a falling, final tone' },
+  { k: 'range', group: 'Pitch', label: 'Range', min: -100, max: 100, step: 5, def: 0, fmt: signed('%'), hint: 'How far the natural intonation swings: down to flatten it (tired, cold), up to exaggerate it (lively, surprised)' },
+  { k: 'tremble', group: 'Pitch', label: 'Tremble', min: 0, max: 100, step: 5, def: 0, fmt: pct, hint: 'A shaky, wavering voice, for fear, grief or strain' },
+  { k: 'emph', group: 'Stress', label: 'Emphasis', min: -100, max: 100, step: 5, def: 0, fmt: signed('%'), hint: 'Stress the syllable (higher, longer, brighter, a little louder) or throw it away' },
+  { k: 'gain', group: 'Stress', label: 'Loudness', min: -18, max: 12, step: 1, def: 0, fmt: signed(' dB'), hint: 'Louder or softer on its own, without the pitch and length that Emphasis adds' },
+  { k: 'tilt', group: 'Stress', label: 'Brightness', min: -12, max: 12, step: 1, def: 0, fmt: signed(' dB'), hint: 'More or less treble: bright and edgy, or dark and muffled' },
+  { k: 'stretch', group: 'Timing', label: 'Stretch', min: 0.5, max: 3, step: 0.05, def: 1, fmt: (v) => `${(+v).toFixed(2)}×`, hint: 'Draw the syllable out (or clip it) without changing its pitch' },
+  { k: 'space', group: 'Timing', label: 'Spacing', min: -300, max: 800, step: 10, def: 0, fmt: signed(' ms'), hint: 'Pause after the syllable; negative tightens the gap' },
+];
+const EMO_RAMPS = [
+  { v: 0, label: 'Evenly', hint: 'Every selected syllable moves by the same amount' },
+  { v: 1, label: 'Build', hint: 'The change grows from nothing on the first selected syllable to full strength on the last' },
+  { v: -1, label: 'Fade', hint: 'The change starts at full strength and fades out by the last selected syllable' },
 ];
 
 async function toggleEmotion(t, btn) {
@@ -1999,10 +2036,10 @@ async function toggleEmotion(t, btn) {
       Object.assign(s, {
         label: part.map((w) => w.s).join('') || String(j + 1),
         ws: j > 0 && !!part[0]?.first,
-        pitch: 0, emph: 0, space: 0, stretch: 1,
+        ...Object.fromEntries(EMO_FIELDS.map((f) => [f.k, f.def])),
       });
     });
-    Object.assign(EMO, { takeId: t.id, sylls, sel: [0, 0], anchor: 0, track: trackPitch(t.samples, SAMPLE_RATE), out: null });
+    Object.assign(EMO, { takeId: t.id, sylls, sel: [0, 0], anchor: 0, undo: [], redo: [], track: trackPitch(t.samples, SAMPLE_RATE), out: null });
   }
   EMO.open = true;
   await renderOutputs(t.voiceId);
@@ -2037,6 +2074,23 @@ async function saveEmotion(t) {
   await renderOutputs(t.voiceId);
 }
 
+// Undo history holds copies of the syllables and selection. Call emoRemember before each edit; a slider drag is one edit.
+const emoSnap = () => ({ sylls: EMO.sylls.map((s) => ({ ...s })), sel: [...EMO.sel], anchor: EMO.anchor });
+function emoRemember() {
+  EMO.undo.push(emoSnap());
+  if (EMO.undo.length > 100) EMO.undo.shift();
+  EMO.redo = [];
+}
+async function emoHistory(t, back) {
+  const from = back ? EMO.undo : EMO.redo;
+  if (!from.length) return;
+  (back ? EMO.redo : EMO.undo).push(emoSnap());
+  Object.assign(EMO, from.pop());
+  await renderOutputs(t.voiceId);
+  emoChanged(t);
+  $('emo')?.querySelectorAll('.syl')[EMO.sel[0]]?.focus({ preventScroll: true });
+}
+
 function emotionPanel(t) {
   const ss = EMO.sylls, n = ss.length;
   const sel = () => ss.slice(EMO.sel[0], EMO.sel[1] + 1);
@@ -2060,6 +2114,7 @@ function emotionPanel(t) {
     const i = EMO.sel[0];
     splitDialog(ss[i].label, async (parts) => {
       const pieces = splitSyllable(t.samples, SAMPLE_RATE, ss, i, parts);
+      emoRemember();
       ss.splice(i, 1, ...pieces);
       EMO.anchor = i; EMO.sel = [i, i + pieces.length - 1];
       await renderOutputs(t.voiceId);
@@ -2067,34 +2122,60 @@ function emotionPanel(t) {
       $('emo')?.querySelectorAll('.syl')[i]?.focus({ preventScroll: true });
     });
   } }, icon('split'), 'Split');
-  const sliders = h('div', { class: 'sgroup' });
+  const edit = (fn) => { emoRemember(); for (const s of sel()) fn(s); update(); emoChanged(t); };
+  // The share of a slider move each selected syllable takes, by its place k in a selection of m.
+  const weight = (k, m) => m < 2 || !EMO.ramp ? 1 : EMO.ramp > 0 ? k / (m - 1) : 1 - k / (m - 1);
+  const sliders = h('div', { class: 'sliders' });
+  let group;
   const inputs = EMO_FIELDS.map((f) => {
-    const out = h('output', { id: 'emo-out-' + f.k });
-    const input = h('input', { type: 'range', id: 'emo-' + f.k, min: f.min, max: f.max, step: f.step,
-      oninput: (e) => { for (const s of sel()) s[f.k] = +e.target.value; update(); emoChanged(t); } });
-    sliders.append(h('label', { for: 'emo-' + f.k, title: f.hint }, f.label), input, out);
-    return { f, input, out };
+    if (f.group !== group?.dataset.group) sliders.append(group = h('div', { class: 'sgroup', 'data-group': f.group }, h('h3', null, f.group)));
+    // A drag shifts each selected syllable from where it started, so the differences between them survive.
+    const row = { f, out: h('output', { id: 'emo-out-' + f.k }), from: f.def, drag: null };
+    row.input = h('input', { type: 'range', id: 'emo-' + f.k, min: f.min, max: f.max, step: f.step,
+      oninput: (e) => {
+        const picked = sel();
+        if (!row.drag) { emoRemember(); row.drag = picked.map((s) => s[f.k]); }
+        const d = +e.target.value - row.from;
+        picked.forEach((s, k) => { s[f.k] = Math.min(f.max, Math.max(f.min, +(row.drag[k] + d * weight(k, picked.length)).toFixed(2))); });
+        update(f.k); emoChanged(t);
+      },
+      onchange: () => { row.drag = null; update(); } });
+    group.append(h('label', { for: 'emo-' + f.k, title: f.hint + '. Double-click to reset.', ondblclick: () => edit((s) => { s[f.k] = f.def; }) }, f.label), row.input, row.out);
+    return row;
   });
+  const ramps = EMO_RAMPS.map((r) => h('button', { class: 'chip', title: r.hint, onclick: () => { EMO.ramp = r.v; update(); } }, r.label));
+  const spread = h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'Spread changes'), ramps);
+  const undoBtn = h('button', { class: 'btn sm icon ghost', 'aria-label': 'Undo', title: 'Undo', onclick: () => emoHistory(t, true) }, icon('undo'));
+  const redoBtn = h('button', { class: 'btn sm icon ghost', 'aria-label': 'Redo', title: 'Redo', onclick: () => emoHistory(t, false) }, icon('redo'));
   const canvas = h('canvas', { class: 'wave', onclick: (e) => seekTake(emoOut(t), e.offsetX / canvas.clientWidth) });
   const time = h('span', { class: 'time' });
 
-  function update() {
+  // skip names the slider being dragged, which keeps its position until it's released.
+  function update(skip) {
     ss.forEach((s, i) => {
       const c = cells[i], on = i >= EMO.sel[0] && i <= EMO.sel[1];
       c.setAttribute('aria-pressed', String(on));
-      const st = stressOf(s);
-      c.classList.toggle('changed', !!(s.pitch || s.emph || s.space || s.stretch !== 1));
-      c.style.minWidth = Math.round(36 * st.stretch) + 'px';
+      const st = stressOf(s), w = Math.round(36 * st.stretch), tick = c.querySelector('.tick');
+      c.classList.toggle('changed', !isNeutral(s));
+      c.classList.toggle('trem', s.tremble > 0);
+      c.style.minWidth = w + 'px';
       c.style.marginRight = (2 + Math.max(0, s.space) / 20) + 'px';
       c.querySelector('.lvl').style.height = Math.min(100, Math.max(4, (s.lvl + st.gain + st.tilt / 2 + 26) / 28 * 100)) + '%';
-      c.querySelector('.tick').style.top = (50 - st.pitch / 12 * 42) + '%';
+      // The line sits at the pitch halfway through the glide and tilts with it (the lane spans ±12 st over 84% of 44 px).
+      tick.style.top = (50 - (st.pitch + s.glide / 2) / 12 * 42) + '%';
+      tick.style.transform = `rotate(${-Math.atan2(s.glide / 12 * 0.42 * 44, w - 6)}rad)`;
     });
-    const picked = sel();
-    splitBtn.disabled = picked.length > 1 || picked[0].label.length < 2 || picked[0].b - picked[0].a < SAMPLE_RATE * 0.06;
-    what.textContent = picked.length > 1 ? `${picked.length} syllables · ${picked.map((s, i) => (i && s.ws ? ' ' : '') + s.label).join('')}`.slice(0, 60) : `“${picked[0].label}”`;
-    for (const { f, input, out } of inputs) {
-      const vals = picked.map((s) => s[f.k]), same = vals.every((v) => v === vals[0]);
-      input.value = vals[0]; out.textContent = same ? f.fmt(vals[0]) : 'mixed';
+    const picked = sel(), m = picked.length;
+    splitBtn.disabled = m > 1 || picked[0].label.length < 2 || picked[0].b - picked[0].a < SAMPLE_RATE * 0.06;
+    what.textContent = m > 1 ? `${m} syllables · ${picked.map((s, i) => (i && s.ws ? ' ' : '') + s.label).join('')}`.slice(0, 60) : `“${picked[0].label}”`;
+    spread.hidden = m < 2;
+    ramps.forEach((b, i) => b.setAttribute('aria-pressed', String(EMO_RAMPS[i].v === EMO.ramp)));
+    undoBtn.disabled = !EMO.undo.length; redoBtn.disabled = !EMO.redo.length;
+    for (const r of inputs) {
+      const vals = picked.map((s) => s[r.f.k]), same = vals.every((v) => v === vals[0]);
+      // The handle sits on the average, or on the end that takes the full change when ramping.
+      if (r.f.k !== skip) { r.input.value = m < 2 || !EMO.ramp ? vals.reduce((a, b) => a + b, 0) / m : vals[EMO.ramp > 0 ? m - 1 : 0]; r.from = +r.input.value; }
+      r.out.textContent = same ? r.f.fmt(vals[0]) : EMO.ramp ? `${r.f.fmt(vals[0])} → ${r.f.fmt(vals[m - 1])}` : 'mixed';
     }
   }
   EMO.tick = () => {
@@ -2103,16 +2184,24 @@ function emotionPanel(t) {
     time.textContent = `${fmtTime(mine ? P.audio.currentTime : 0)} / ${fmtTime(out.duration)}`;
   };
   update();
-  return h('section', { class: 'emo', id: 'emo', 'aria-label': 'Emotion editor' },
+  return h('section', { class: 'emo', id: 'emo', 'aria-label': 'Emotion editor',
+    onkeydown: (e) => {
+      const k = e.key.toLowerCase();
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || (k !== 'z' && k !== 'y')) return;
+      e.preventDefault(); emoHistory(t, k === 'z' && !e.shiftKey);
+    } },
     h('div', { class: 'row' },
       h('span', { class: 'pane-label grow' }, icon('emotion'), 'Emotion'),
+      undoBtn, redoBtn,
       h('button', { class: 'btn sm icon ghost', 'aria-label': 'Close emotion editor', title: 'Close', onclick: () => toggleEmotion(t) }, icon('close'))),
     lane,
     h('div', { class: 'row' }, what,
       h('button', { class: 'btn sm ghost', onclick: () => { EMO.anchor = 0; EMO.sel = [0, n - 1]; update(); } }, 'Select all'),
       splitBtn,
-      h('button', { class: 'btn sm ghost', onclick: () => { for (const s of sel()) { s.pitch = s.emph = s.space = 0; s.stretch = 1; } update(); emoChanged(t); } }, icon('reset'), 'Reset')),
+      h('button', { class: 'btn sm ghost', onclick: () => edit((s) => { for (const f of EMO_FIELDS) s[f.k] = f.def; }) }, icon('reset'), 'Reset')),
+    spread,
     sliders,
+    h('p', { class: 'muted small', style: 'margin:0' }, 'Shift-click or shift-arrow to select a run of syllables. Double-click a setting’s name to reset it. Ctrl/⌘-Z undoes.'),
     h('div', { class: 'wave-row' },
       h('button', { class: 'play sm', 'data-play': t.id + '~emo', 'aria-label': 'Play', onclick: () => playTake(emoOut(t)) }, icon('play')),
       h('div', { class: 'grow', style: 'min-width:0' }, canvas)),
