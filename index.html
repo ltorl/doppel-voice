@@ -2059,8 +2059,7 @@ async function alignSyllables(x, words, onProgress) {
 
 // Each syllable carries pitch (semitones), glide (semitones the pitch bends by across it), range (−100…100 % of its
 // intonation swing), tremble (0…100 % shake), emph (−100…100 % stress), gain (dB), tilt (dB of treble), stretch
-// (× length of its sounded part, pitch kept) and space (ms of pause after it; negative tightens the gap, first out of
-// the silence that's there, then by squeezing the syllable).
+// (× length of its sounded part, pitch kept) and space (ms of pause added after it).
 // Stress in speech is mostly a pitch accent plus length and a brighter tone, with loudness only a small part,
 // so emphasis drives all four together on top of the syllable's own pitch, gain, tilt and stretch.
 const stressOf = (s) => {
@@ -2071,7 +2070,7 @@ const isNeutral = (s) => EMO_FIELDS.every((f) => s[f.k] === f.def);
 function renderEmotion(x, sr, sylls, track) {
   if (!sylls.length || sylls.every(isNeutral)) return x;
   track ||= trackPitch(x, sr, EMO_GATE);
-  const hop = Math.round(sr * 0.01), n = Math.ceil(x.length / hop) + 2, ms = sr / 1000, fade = Math.round(8 * ms);
+  const hop = Math.round(sr * 0.01), n = Math.ceil(x.length / hop) + 2, ms = sr / 1000;
   const { periods } = track, periodAt = (t) => periods[Math.min(periods.length - 1, Math.round(t / track.hop))] || 0;
   // Glide replaces the syllable's own rise or fall, so it needs the voiced stretch [v0, v1] of its sounded core and
   // the shape of its contour there: a least-squares parabola k1·u + k2·u² in semitones over u = 0…1, which follows
@@ -2125,26 +2124,32 @@ function renderEmotion(x, sr, sylls, track) {
   const wobble = (t) => Math.sin(2 * Math.PI * 6 * t / sr);
   const pitchAt = (ta, ts) => 2 ** ((semis(ta) + 0.8 * trembleAt(ta) * wobble(ts)) / 12) * rangeFactor(ta);
 
-  // Piecewise-linear map from output to input time; pauses hold still and get muted.
+  // Piecewise-linear map from output to input time; a pause holds still and is silent.
   const seg = [];
-  let o = 0, head = 0, warped = false;
+  let o = 0, warped = false;
   const push = (i0, i1, len, pause = false) => { len = Math.round(len); if (len > 0) { seg.push({ o0: o, o1: o + len, i0, i1, pause }); o += len; } };
   push(0, sylls[0].a, sylls[0].a);
   sylls.forEach((s, j) => {
-    const d = s.space * ms, [ql, qr] = s.quiet, room = Math.max(0, ql + qr - 20 * ms);
-    const cut = d < 0 ? Math.min(-d, room) : 0, cutL = room ? cut * ql / (ql + qr) : 0;
-    const i0 = s.a + head, i1 = s.b - cutL, len = Math.max(0.6 * (i1 - i0), i1 - i0 - (d < 0 ? -d - cut : 0));
-    // Stretch only the sounded core; the silence either side keeps its length (bar any squeeze).
-    const c0 = Math.max(i0, s.a + (j ? sylls[j - 1].quiet[1] : 0)), c1 = Math.max(c0, Math.min(i1, s.b - ql)), f = len / (i1 - i0);
-    if (len < i1 - i0 - 1 || E[j].stretch !== 1) warped = true;
-    push(i0, c0, (c0 - i0) * f);
-    push(c0, c1, (c1 - c0) * f * E[j].stretch);
-    push(c1, i1, (i1 - c1) * f);
-    if (d > 0) push(i1, i1, d, true);
-    head = cut - cutL;
+    // Stretch only the sounded core; the silence either side keeps its length.
+    const c0 = Math.min(s.b, s.a + (j ? sylls[j - 1].quiet[1] : 0)), c1 = Math.max(c0, s.b - s.quiet[0]);
+    if (E[j].stretch !== 1) warped = true;
+    push(s.a, c0, c0 - s.a);
+    push(c0, c1, (c1 - c0) * E[j].stretch);
+    push(c1, s.b, s.b - c1);
+    if (s.space > 0) push(s.b, s.b, s.space * ms, true);
   });
-  const end = sylls[sylls.length - 1].b + head;
+  const end = sylls[sylls.length - 1].b;
   push(end, x.length, x.length - end);
+  // A cut rarely falls in true silence, so the sound fades out over 30 ms into each pause (masking the cut) and back
+  // in over 10 ms after it (short enough to keep the next syllable's attack).
+  const env = new Float32Array(o).fill(1), fadeOut = Math.round(30 * ms), fadeIn = Math.round(10 * ms);
+  const ease = (u) => 0.5 - 0.5 * Math.cos(Math.PI * u);
+  for (const s of seg) {
+    if (!s.pause) continue;
+    env.fill(0, s.o0, s.o1);
+    for (let t = Math.max(0, s.o0 - fadeOut); t < s.o0; t++) env[t] *= ease((s.o0 - t) / fadeOut);
+    for (let t = s.o1; t < Math.min(o, s.o1 + fadeIn); t++) env[t] *= ease((t - s.o1) / fadeIn);
+  }
   let k = 0;
   const at = (t) => {
     if (t < seg[k].o0) k = 0;
@@ -2162,7 +2167,7 @@ function renderEmotion(x, sr, sylls, track) {
   for (const s of seg) for (let t = s.o0; t < s.o1; t++) {
     const ti = s.i0 + (s.i1 - s.i0) * (t - s.o0) / (s.o1 - s.o0), j = ti | 0;
     let v = y ? y[t] : (x[j] ?? 0) + ((x[j + 1] ?? 0) - (x[j] ?? 0)) * (ti - j);
-    if (s.pause) v *= Math.max(0, 1 - (t - s.o0) / fade, 1 - (s.o1 - t) / fade);
+    v *= env[t];
     hp = alpha * (hp + v - prev); prev = v;
     v += (10 ** (tiltAt(ti) / 20) - 1) * hp;
     out[t] = v *= 10 ** ((gainAt(ti) + 3 * trembleAt(ti) * wobble(t)) / 20);
@@ -2238,7 +2243,7 @@ const EMO_FIELDS = [
   { k: 'gain', group: 'Stress', label: 'Loudness', min: -18, max: 12, step: 1, def: 0, fmt: signed(' dB'), hint: 'Louder or softer on its own, without the pitch and length that Emphasis adds' },
   { k: 'tilt', group: 'Stress', label: 'Brightness', min: -12, max: 12, step: 1, def: 0, fmt: signed(' dB'), hint: 'More or less treble: bright and edgy, or dark and muffled' },
   { k: 'stretch', group: 'Timing', label: 'Stretch', min: 0.5, max: 3, step: 0.05, def: 1, fmt: (v) => `${(+v).toFixed(2)}×`, hint: 'Draw the syllable out (or clip it) without changing its pitch' },
-  { k: 'space', group: 'Timing', label: 'Spacing', min: -300, max: 800, step: 10, def: 0, fmt: signed(' ms'), hint: 'Pause after the syllable; negative tightens the gap' },
+  { k: 'space', group: 'Timing', label: 'Spacing', min: 0, max: 800, step: 10, def: 0, fmt: signed(' ms'), hint: 'Add a pause after the syllable' },
 ];
 // The editor tracks pitch further into quiet speech than shaping does, so fading endings can still be bent.
 const EMO_GATE = 0.08;
@@ -2407,7 +2412,7 @@ function emotionPanel(t) {
       c.classList.toggle('changed', !isNeutral(s));
       c.classList.toggle('trem', s.tremble > 0);
       c.style.minWidth = w + 'px';
-      c.style.marginRight = (2 + Math.max(0, s.space) / 20) + 'px';
+      c.style.marginRight = (2 + s.space / 20) + 'px';
       c.querySelector('.lvl').style.height = Math.min(100, Math.max(4, (s.lvl + st.gain + st.tilt / 2 + 26) / 28 * 100)) + '%';
       // The line sits at the pitch halfway through the glide and tilts with it (the lane spans ±12 st over 84% of 44 px).
       tick.style.top = (50 - (st.pitch + s.glide / 2) / 12 * 42) + '%';
