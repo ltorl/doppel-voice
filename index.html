@@ -979,8 +979,9 @@ function resampleBy(x, factor) {
   return y;
 }
 
-// Per-frame pitch period in samples (0 = unvoiced), by normalized autocorrelation.
-function trackPitch(x, sr) {
+// Per-frame pitch period in samples (0 = unvoiced), by normalized autocorrelation. Frames quieter than gate × the
+// clip's RMS count as unvoiced.
+function trackPitch(x, sr, gate = 0.25) {
   const hop = Math.round(sr * 0.01), win = Math.round(sr * 0.02);
   const minLag = Math.floor(sr / 420), maxLag = Math.ceil(sr / 60);
   const nFrames = Math.max(0, Math.floor((x.length - win - maxLag) / hop));
@@ -990,7 +991,7 @@ function trackPitch(x, sr) {
   for (let fr = 0; fr < nFrames; fr++) {
     const s = fr * hop;
     let e0 = 0; for (let i = 0; i < win; i++) e0 += x[s + i] * x[s + i];
-    if (Math.sqrt(e0 / win) < g * 0.25) continue;
+    if (Math.sqrt(e0 / win) < g * gate) continue;
     let best = 0;
     for (let lag = minLag; lag <= maxLag; lag++) {
       let num = 0, e1 = 0;
@@ -1876,11 +1877,30 @@ const stressOf = (s) => {
 const isNeutral = (s) => EMO_FIELDS.every((f) => s[f.k] === f.def);
 function renderEmotion(x, sr, sylls, track) {
   if (!sylls.length || sylls.every(isNeutral)) return x;
-  track ||= trackPitch(x, sr);
+  track ||= trackPitch(x, sr, EMO_GATE);
   const hop = Math.round(sr * 0.01), n = Math.ceil(x.length / hop) + 2, ms = sr / 1000, fade = Math.round(8 * ms);
+  const { periods } = track, periodAt = (t) => periods[Math.min(periods.length - 1, Math.round(t / track.hop))] || 0;
+  // Glide replaces the syllable's own rise or fall, so it needs the voiced stretch [v0, v1] of its sounded core and
+  // the shape of its contour there: a least-squares parabola k1·u + k2·u² in semitones over u = 0…1, which follows
+  // the late, steep drop a sentence usually ends on. Faint voicing after the core (a final syllable often fades out
+  // in creak) is left out of both, but still gets the full glide.
+  const det3 = (a, b, c, d, e, f, g, h, i) => a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
   const E = sylls.map((s, j) => {
-    const c0 = s.a + (j ? sylls[j - 1].quiet[1] : 0);
-    return { ...s, ...stressOf(s), c0, c1: Math.max(c0 + 1, s.b - s.quiet[0]) };
+    const c0 = s.a + (j ? sylls[j - 1].quiet[1] : 0), c1 = Math.max(c0 + 1, s.b - s.quiet[0]);
+    const pts = [];
+    for (let t = c0; t < c1; t += track.hop) { const T = periodAt(t); if (T) pts.push([t, 12 * Math.log2(sr / T)]); }
+    let v0 = c0, v1 = c1, k1 = 0, k2 = 0;
+    if (pts.length > 3) {
+      v0 = pts[0][0]; v1 = pts[pts.length - 1][0];
+      const S = [0, 0, 0, 0, 0], P = [0, 0, 0];
+      for (const [t, p] of pts) { const u = (t - v0) / (v1 - v0); for (let i = 0, ui = 1; i < 5; i++, ui *= u) { S[i] += ui; if (i < 3) P[i] += ui * p; } }
+      const D = det3(S[0], S[1], S[2], S[1], S[2], S[3], S[2], S[3], S[4]);
+      if (Math.abs(D) > 1e-9) {
+        k1 = det3(S[0], P[0], S[2], S[1], P[1], S[3], S[2], P[2], S[4]) / D;
+        k2 = det3(S[0], S[1], P[0], S[1], S[2], P[1], S[2], S[3], P[2]) / D;
+      }
+    }
+    return { ...s, ...stressOf(s), v0, v1, k1, k2 };
   });
   // Per-frame curves of fn(syllable, inputSample), smoothed so changes glide across syllable boundaries instead of stepping.
   const curve = (fn, radius) => {
@@ -1893,16 +1913,20 @@ function renderEmotion(x, sr, sylls, track) {
     }
     return (t) => { const p = Math.max(0, t / hop), j = Math.min(n - 2, p | 0), u = Math.min(1, p - j); return c[j] * (1 - u) + c[j + 1] * u; };
   };
-  // Glide bends the pitch across the sounded core, from the syllable's own pitch to pitch + glide.
-  const semis = curve((s, t) => s.pitch + s.glide * Math.min(1, Math.max(0, (t - s.c0) / (s.c1 - s.c0))), 4);
+  // Glide makes the voiced stretch end that many semitones above (or below) where it starts: the natural contour is
+  // taken out, fully once the glide reaches 2 st so small settings still ease in, and a straight glide put in.
+  const semis = curve((s, t) => {
+    const u = Math.min(1, Math.max(0, (t - s.v0) / (s.v1 - s.v0))), shape = Math.min(24, Math.max(-24, s.k1 * u + s.k2 * u * u));
+    return s.pitch + s.glide * u - shape * Math.min(1, Math.abs(s.glide) / 2);
+  }, 4);
   const gainAt = curve((s) => s.gain, 3), tiltAt = curve((s) => s.tilt, 3);
   const rangeAt = curve((s) => s.range / 100, 4), trembleAt = curve((s) => s.tremble / 100, 4);
   // Range scales how far the pitch strays from the take's median, like psola's expr. Tremble is a 6 Hz waver of up to
   // ±80 cents and ±3 dB, timed on the output so stretching doesn't slow it down.
-  const { periods } = track, voicedP = Array.from(periods).filter(Boolean).sort((a, b) => a - b);
+  const voicedP = Array.from(periods).filter(Boolean).sort((a, b) => a - b);
   const medT = voicedP.length ? voicedP[voicedP.length >> 1] : 0;
   const rangeFactor = (ta) => {
-    const r = rangeAt(ta), T = r && medT ? periods[Math.min(periods.length - 1, Math.round(ta / track.hop))] : 0;
+    const r = rangeAt(ta), T = r && medT ? periodAt(ta) : 0;
     return T ? Math.min(2, Math.max(0.5, (medT / T) ** r)) : 1;
   };
   const wobble = (t) => Math.sin(2 * Math.PI * 6 * t / sr);
@@ -2007,7 +2031,7 @@ function splitDialog(label, onSplit) {
 const EMO = { takeId: null, open: false, sylls: [], sel: [0, 0], anchor: 0, ramp: 0, undo: [], redo: [], track: null, out: null, timer: 0, tick: null };
 const EMO_FIELDS = [
   { k: 'pitch', group: 'Pitch', label: 'Pitch', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'Raise or lower the syllable' },
-  { k: 'glide', group: 'Pitch', label: 'Glide', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'Bend the pitch through the syllable: up for a questioning lift, down for a falling, final tone' },
+  { k: 'glide', group: 'Pitch', label: 'Glide', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'How far the pitch rises (or falls) through the syllable, in place of its natural movement: up for a questioning lift, down for a falling, final tone' },
   { k: 'range', group: 'Pitch', label: 'Range', min: -100, max: 100, step: 5, def: 0, fmt: signed('%'), hint: 'How far the natural intonation swings: down to flatten it (tired, cold), up to exaggerate it (lively, surprised)' },
   { k: 'tremble', group: 'Pitch', label: 'Tremble', min: 0, max: 100, step: 5, def: 0, fmt: pct, hint: 'A shaky, wavering voice, for fear, grief or strain' },
   { k: 'emph', group: 'Stress', label: 'Emphasis', min: -100, max: 100, step: 5, def: 0, fmt: signed('%'), hint: 'Stress the syllable (higher, longer, brighter, a little louder) or throw it away' },
@@ -2016,6 +2040,8 @@ const EMO_FIELDS = [
   { k: 'stretch', group: 'Timing', label: 'Stretch', min: 0.5, max: 3, step: 0.05, def: 1, fmt: (v) => `${(+v).toFixed(2)}×`, hint: 'Draw the syllable out (or clip it) without changing its pitch' },
   { k: 'space', group: 'Timing', label: 'Spacing', min: -300, max: 800, step: 10, def: 0, fmt: signed(' ms'), hint: 'Pause after the syllable; negative tightens the gap' },
 ];
+// The editor tracks pitch further into quiet speech than shaping does, so fading endings can still be bent.
+const EMO_GATE = 0.08;
 const EMO_RAMPS = [
   { v: 0, label: 'Evenly', hint: 'Every selected syllable moves by the same amount' },
   { v: 1, label: 'Build', hint: 'The change grows from nothing on the first selected syllable to full strength on the last' },
@@ -2039,7 +2065,7 @@ async function toggleEmotion(t, btn) {
         ...Object.fromEntries(EMO_FIELDS.map((f) => [f.k, f.def])),
       });
     });
-    Object.assign(EMO, { takeId: t.id, sylls, sel: [0, 0], anchor: 0, undo: [], redo: [], track: trackPitch(t.samples, SAMPLE_RATE), out: null });
+    Object.assign(EMO, { takeId: t.id, sylls, sel: [0, 0], anchor: 0, undo: [], redo: [], track: trackPitch(t.samples, SAMPLE_RATE, EMO_GATE), out: null });
   }
   EMO.open = true;
   await renderOutputs(t.voiceId);
