@@ -443,6 +443,7 @@ const ICONS = {
   emotion: '<path d="M2 8h1.5l1.5-4 2 8 2-10 2 9 1.5-3H14"/>',
   close: '<path d="M4 4l8 8M12 4l-8 8"/>',
   split: '<path d="M8 1.5v13M5 5 2 8l3 3M11 5l3 3-3 3"/>',
+  join: '<path d="M8 1.5v13M1.5 8h4.5M4 5.5 6.5 8 4 10.5M14.5 8H10M12 5.5 9.5 8l2.5 2.5"/>',
   undo: '<path d="M5.5 3.5 2.5 6.5l3 3M2.5 6.5H10a3.5 3.5 0 0 1 0 7H8"/>',
   redo: '<path d="m10.5 3.5 3 3-3 3M13.5 6.5H6a3.5 3.5 0 0 0 0 7h2"/>',
 };
@@ -1794,74 +1795,266 @@ async function deleteTake(t) {
 }
 
 // ---------- emotion editor ----------
-// Syllable nuclei are loudness peaks of the smoothed envelope; boundaries sit in the dips between them.
-// With want > 0 (the syllable count of the script) the most prominent peaks win.
-function findSyllables(x, sr, want = 0) {
+// Loudness of the vowel band (200–800 Hz, where s, sh and other hiss carry little) per 10 ms frame, in dB.
+function vowelEnvelope(x, sr) {
   const hop = Math.round(sr * 0.01), n = Math.floor(x.length / hop);
+  const lp = 1 / (1 + 2 * Math.PI * 800 / sr), hp = 1 / (1 + 2 * Math.PI * 200 / sr);
+  const env = new Float32Array(n);
+  let h = 0, prev = 0, l1 = 0, l2 = 0;
+  for (let f = 0; f < n; f++) {
+    let e = 0;
+    for (let i = f * hop, end = i + hop; i < end; i++) {
+      h = hp * (h + x[i] - prev); prev = x[i];
+      l1 += (1 - lp) * (h - l1); l2 += (1 - lp) * (l1 - l2);
+      e += l2 * l2;
+    }
+    env[f] = 10 * Math.log10(e / hop + 1e-10);
+  }
+  return { env, hop, n };
+}
+
+// Expected share of the sounded time for a script syllable: longer spellings take longer, and so does the last
+// syllable before a pause.
+const syllableWeight = (w) => (1 + 0.2 * w.s.length) * (w.pause ? 1.5 : 1);
+
+// Splits speech into syllables, each { a, b } in samples with its loudness peak and text: [from, to) indices into
+// words (the script's syllables; null when unknown, and the count comes from loudness peaks instead).
+// Cuts go at dips in the vowel band, chosen together by dynamic programming so each piece's sounded length fits
+// what its text predicts. A piece may carry two script syllables the speaker ran together ("fav'rite"), and where
+// syllables run together without any dip a cut can still go in, at no reward, wherever the lengths call for one.
+function findSyllables(x, sr, words = null) {
+  const { env, hop, n } = vowelEnvelope(x, sr);
   if (n < 5) return [];
-  const db = new Float32Array(n), env = new Float32Array(n);
-  for (let f = 0; f < n; f++) {
-    let e = 0; for (let i = f * hop, end = i + hop; i < end; i++) e += x[i] * x[i];
-    db[f] = 10 * Math.log10(e / hop + 1e-10);
-  }
-  for (let f = 0; f < n; f++) {
-    let s = 0, c = 0; for (let j = Math.max(0, f - 3); j <= Math.min(n - 1, f + 3); j++) { s += db[j]; c++; }
-    env[f] = s / c;
-  }
   const sorted = Float32Array.from(env).sort();
   const top = sorted[n - 1], silence = Math.max(top - 32, sorted[Math.floor(n * 0.1)] + 8);
-  const cands = [];
-  for (let f = 1; f < n - 1; f++) {
-    if (env[f] <= silence || env[f] < env[f - 1] || env[f] <= env[f + 1]) continue;
-    let l = env[f], r = env[f];
-    for (let j = f - 1; j >= 0 && env[j] <= env[f]; j--) l = Math.min(l, env[j]);
-    for (let j = f + 1; j < n && env[j] <= env[f]; j++) r = Math.min(r, env[j]);
-    cands.push({ f, prom: env[f] - Math.max(l, r) });
-  }
-  cands.sort((a, b) => b.prom - a.prom);
-  let peaks = [];
-  for (const c of cands) if (peaks.every((p) => Math.abs(p.f - c.f) >= 9)) peaks.push(c);
-  peaks = want && peaks.length >= want ? peaks.slice(0, want) : peaks.filter((p) => p.prom >= 2.5 || peaks.length <= want);
-  peaks.sort((a, b) => a.f - b.f);
-  if (!peaks.length) return [];
-  const sylls = peaks.map((p) => ({ peak: p.f, lvl: env[p.f] - top }));
-  let a = peaks[0].f; while (a > 0 && env[a - 1] > silence) a--;
-  sylls[0].a = Math.max(0, a - 2) * hop;
-  for (let i = 0; i < sylls.length - 1; i++) {
-    let v = sylls[i].peak;
-    for (let f = v; f < sylls[i + 1].peak; f++) if (env[f] < env[v]) v = f;
-    let l = v, r = v;
-    if (env[v] < silence) {
-      while (l > sylls[i].peak && env[l - 1] < silence) l--;
-      while (r < sylls[i + 1].peak && env[r + 1] < silence) r++;
+  let fs = 0; while (fs < n && env[fs] <= silence) fs++;
+  let fe = n - 1; while (fe > fs && env[fe] <= silence) fe--;
+  if (fe - fs < 3) return [];
+  fs = Math.max(0, fs - 2); fe = Math.min(n, fe + 3);
+  let weights = words?.map(syllableWeight);
+  if (!weights?.length) {
+    // Count prominent peaks, at least 90 ms apart, on the envelope smoothed over ±30 ms.
+    const sm = env.map((_, f) => { let s = 0, c = 0; for (let j = Math.max(0, f - 3); j <= Math.min(n - 1, f + 3); j++) { s += env[j]; c++; } return s / c; });
+    let peaks = 0, lastPeak = -Infinity;
+    for (let f = fs + 1; f < fe - 1; f++) {
+      if (sm[f] <= silence || sm[f] < sm[f - 1] || sm[f] <= sm[f + 1] || f - lastPeak < 9) continue;
+      let l = sm[f], r = sm[f];
+      for (let j = f - 1; j >= 0 && sm[j] <= sm[f]; j--) l = Math.min(l, sm[j]);
+      for (let j = f + 1; j < n && sm[j] <= sm[f]; j++) r = Math.min(r, sm[j]);
+      if (sm[f] - Math.max(l, r) >= 2.5) { peaks++; lastPeak = f; }
     }
-    const cut = Math.round((l + r + 1) / 2) * hop, half = env[v] < silence ? (r - l + 1) * hop / 2 : 0;
-    sylls[i].b = sylls[i + 1].a = cut;
-    sylls[i].quiet = [half, half]; // silence either side of the boundary after syllable i
+    weights = new Array(Math.max(1, peaks)).fill(1);
+  }
+  // A dip scores how far it sits below the loudest frame within 140 ms on both sides; pauses count in full.
+  const depth = new Float32Array(n);
+  for (let f = fs; f < fe; f++) {
+    let l = -Infinity, r = -Infinity;
+    for (let j = Math.max(fs, f - 14); j <= f; j++) l = Math.max(l, env[j]);
+    for (let j = f; j < Math.min(fe, f + 15); j++) r = Math.max(r, env[j]);
+    depth[f] = Math.max(0, Math.min(l, r) - Math.max(env[f], silence - 6));
+  }
+  const A = new Int32Array(n + 1); // sounded frames before each frame
+  for (let f = 0; f < n; f++) A[f + 1] = A[f] + (env[f] > silence ? 1 : 0);
+  const wsum = weights.reduce((a, b) => a + b, 0), share = weights.map((w) => (A[fe] - A[fs]) * w / wsum);
+  // Cut candidates: the bottom of each dip (lowest within ±30 ms) and the middle of each pause score their depth;
+  // every third frame between them is a fallback that scores nothing.
+  const pts = [fs], gain = [0];
+  for (let f = fs + 1; f < fe - 1; f++) {
+    if (env[f] <= silence) {
+      let g = f; while (g + 1 < fe && env[g + 1] <= silence) g++;
+      pts.push((f + g) >> 1); gain.push(depth[(f + g) >> 1]); f = g; continue;
+    }
+    let low = depth[f] > 0;
+    for (let j = Math.max(fs, f - 3); j <= Math.min(fe - 1, f + 3) && low; j++) if (env[j] < env[f] || (env[j] === env[f] && j < f)) low = false;
+    if (low || f % 3 === 0) { pts.push(f); gain.push(low ? depth[f] : 0); }
+  }
+  pts.push(fe); gain.push(0);
+  // best[t][i]: the best score with the first t script syllables placed and the last piece ending at pts[i].
+  // A piece scores its closing cut, less 4·ln²(sounded/expected length), less 1 more when it carries two syllables.
+  const T = weights.length, M = pts.length;
+  const best = Array.from({ length: T + 1 }, () => new Float64Array(M).fill(-Infinity));
+  const back = Array.from({ length: T + 1 }, () => new Int32Array(M)), took = Array.from({ length: T + 1 }, () => new Int8Array(M));
+  best[0][0] = 0;
+  for (let t = 1; t <= T; t++) for (let i = 1; i < M; i++) {
+    if ((t === T) !== (i === M - 1)) continue;
+    for (let m = 1; m <= Math.min(2, t); m++) {
+      const want = m === 1 ? share[t - 1] : share[t - 1] + share[t - 2], from = best[t - m];
+      for (let j = i - 1; j >= 0; j--) {
+        const c = A[pts[i]] - A[pts[j]];
+        if (c > want * 5 + 10) break;
+        if (c < 4 || from[j] === -Infinity) continue;
+        const v = from[j] + (t === T ? 0 : gain[i]) - 4 * Math.log(c / want) ** 2 - (m - 1);
+        if (v > best[t][i]) { best[t][i] = v; back[t][i] = j; took[t][i] = m; }
+      }
+    }
+  }
+  // Too much script for the audio (a take stopped early, say): fall back to counting syllables by ear.
+  if (best[T][M - 1] === -Infinity) return words ? findSyllables(x, sr) : [];
+  const cuts = [fe], text = [];
+  for (let t = T, i = M - 1; t > 0;) { const m = took[t][i]; text.unshift([t - m, t]); i = back[t][i]; t -= m; cuts.unshift(pts[i]); }
+  const sylls = text.map((tx, k) => {
+    let pk = cuts[k]; for (let f = cuts[k]; f < cuts[k + 1]; f++) if (env[f] > env[pk]) pk = f;
+    return { peak: pk, lvl: env[pk] - top, text: words ? tx : null };
+  });
+  sylls[0].a = cuts[0] * hop;
+  for (let i = 0; i < sylls.length - 1; i++) {
+    let l = cuts[i + 1], r = l;
+    const pause = env[l] <= silence;
+    if (pause) {
+      while (l > sylls[i].peak && env[l - 1] <= silence) l--;
+      while (r < sylls[i + 1].peak && env[r + 1] <= silence) r++;
+    }
+    sylls[i].b = sylls[i + 1].a = (pause ? Math.round((l + r + 1) / 2) : l) * hop;
+    sylls[i].quiet = pause ? [(r - l + 1) * hop / 2, (r - l + 1) * hop / 2] : [0, 0]; // silence either side of the cut after syllable i
   }
   const last = sylls[sylls.length - 1];
-  let b = last.peak; while (b < n - 1 && env[b + 1] > silence) b++;
-  last.b = Math.min(x.length, (b + 3) * hop);
+  last.b = Math.min(x.length, fe * hop);
   last.quiet = [0, x.length - last.b];
   return sylls;
 }
 
-// Rough English syllables of the script, used only to label what the audio analysis found.
+// Rough English syllables of the script: how many to look for, their expected lengths, and labels for what's found.
 function textSyllables(text) {
-  const out = [];
-  text.replace(/\[[^\]]*\]/g, ' ').split(/\s+/).forEach((word, wi) => {
+  const out = [], tokens = text.replace(/\[[^\]]*\]/g, ' ').split(/\s+/);
+  tokens.forEach((word, wi) => {
     const w = word.replace(/[^\p{L}\p{N}'’]/gu, ''), lw = w.toLowerCase();
     if (!w) return;
     const groups = [...lw.matchAll(/[aeiouy]+/g)].map((m) => m.index);
-    // Silent endings: "make", "jumped", "takes" (but not "table", "wanted", "boxes").
+    // Silent endings: "make", "jumped", "takes" (but not "table", "wanted", "boxes"), and the e before a suffix ("lately").
     if (groups.length > 1 && ((/[^aeiouy]e$/.test(lw) && !/[^aeiouy]le$/.test(lw)) || /[^aeiouytd]ed$/.test(lw) || /[^aeiouysxzh]es$/.test(lw))) groups.pop();
+    const sfx = lw.match(/[aeiouy][^aeiouy]{1,2}e(ly|ments?|ful|less|ness)$/);
+    if (sfx && groups.length > 2) groups.splice(groups.indexOf(lw.length - sfx[1].length - 1), 1);
     const cuts = groups.slice(1).map((g, k) => {
       let c = g; while (c > groups[k] && !/[aeiouy]/.test(lw[c - 1])) c--;
-      return g - c > 1 ? c + 1 : c;
+      const cl = lw.slice(c, g);
+      if (g === lw.length - 1 && /[^aeiouy]le$/.test(lw)) return g - 2; // "ta|ble"
+      if (cl.length > 1 && cl.endsWith('ck')) return g;                   // "pock|et"
+      if (cl.length > 1 && /(th|sh|ch|ph|wh)$/.test(cl)) return g - 2;    // "wea|ther", "sea|shells"
+      return cl.length > 1 ? c + 1 : c;
     });
-    [0, ...cuts].forEach((c, k, all) => out.push({ s: w.slice(c, all[k + 1] ?? w.length), word: wi, first: k === 0, last: k === all.length - 1 }));
+    const pause = /[.,!?;:…]$/.test(word) || !tokens.slice(wi + 1).some((t) => /[\p{L}\p{N}]/u.test(t));
+    [0, ...cuts].forEach((c, k, all) => out.push({ s: w.slice(c, all[k + 1] ?? w.length), word: wi, first: k === 0, last: k === all.length - 1, pause: pause && k === all.length - 1 }));
   });
   return out;
+}
+
+// ---------- syllable aligner ----------
+// A small English speech recognizer (wav2vec2-base), used only to find when each letter of the script is spoken.
+// It downloads the first time the emotion editor opens and is cached with the voice model: 4-bit with fp16
+// activations on a GPU that has shader-f16 (~66 MB), 4-bit on other GPUs (~90 MB), and 8-bit on the CPU (~95 MB,
+// and a few seconds per take rather than a fraction of one).
+const ALIGNER_HF = 'https://huggingface.co/Xenova/wav2vec2-base-960h/resolve/main/onnx/';
+const ALIGN_LETTERS = "ETAONIHSRDLUMWCFGYPBVK'XJQZ"; // token ids 5…31; 0 is the CTC blank
+let alignerSession = null;
+function loadAligner(onProgress) {
+  const gpu = S.backend === 'webgpu', file = !gpu ? 'model_quantized.onnx' : S.hasF16 ? 'model_q4f16.onnx' : 'model_q4.onnx';
+  alignerSession ??= fetchCached(ALIGNER_HF + file, onProgress)
+    .then((buf) => ort.InferenceSession.create(buf, { executionProviders: gpu ? ['webgpu', 'wasm'] : ['wasm'], graphOptimizationLevel: 'all', logSeverityLevel: 3 }))
+    .catch((e) => { alignerSession = null; throw e; });
+  return alignerSession;
+}
+
+// 24 kHz → 16 kHz (the aligner's rate) through a windowed-sinc low-pass at 7.6 kHz.
+function to16k(x) {
+  const n = Math.floor(x.length * 2 / 3), y = new Float32Array(n), R = 24, fc = 7600 / 24000;
+  for (let i = 0; i < n; i++) {
+    const t = i * 1.5, c = Math.floor(t);
+    let s = 0;
+    for (let k = Math.max(0, c - R + 1); k <= Math.min(x.length - 1, c + R); k++) {
+      const d = t - k;
+      s += x[k] * (d ? Math.sin(2 * Math.PI * fc * d) / (Math.PI * d) : 2 * fc) * (0.5 + 0.5 * Math.cos(Math.PI * d / R));
+    }
+    y[i] = s;
+  }
+  return y;
+}
+
+// Per-frame log-probabilities (50 frames a second) over the aligner's tokens. Long takes run in 18 s windows with
+// 1 s of context either side, so memory stays bounded.
+async function alignerLogProbs(session, y) {
+  let mean = 0; for (const v of y) mean += v; mean /= y.length;
+  let vr = 0; for (const v of y) vr += (v - mean) ** 2;
+  const sd = Math.sqrt(vr / y.length + 1e-7), z = y.map((v) => (v - mean) / sd);
+  const HOP = 320, CTX = 50 * HOP, KEEP = 900 * HOP, rows = [];
+  for (let c0 = 0; c0 < z.length; c0 += KEEP) {
+    const s0 = Math.max(0, c0 - CTX), s1 = Math.min(z.length, c0 + KEEP + CTX), end = Math.min(z.length, c0 + KEEP);
+    const win = s1 - s0 >= 400 ? z.subarray(s0, s1) : Float32Array.from({ length: 400 }, (_, i) => z[s0 + i] ?? 0);
+    const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', win, [1, win.length]) });
+    const { data: d, dims: [, F, V] } = out[session.outputNames[0]];
+    for (let f = 0; f < F; f++) {
+      const at = s0 + f * HOP;
+      if (at < c0 || at >= end) continue;
+      let m = -Infinity, sum = 0;
+      for (let v = 0; v < V; v++) m = Math.max(m, d[f * V + v]);
+      for (let v = 0; v < V; v++) sum += Math.exp(d[f * V + v] - m);
+      const lse = m + Math.log(sum);
+      rows.push(Float32Array.from({ length: V }, (_, v) => d[f * V + v] - lse));
+    }
+  }
+  return rows;
+}
+
+// Viterbi CTC alignment of the token ids to the frames: each token's first and last frame, or null if it can't fit.
+function ctcAlign(lp, toks) {
+  const T = lp.length, S = 2 * toks.length + 1;
+  if (!toks.length || T < toks.length) return null;
+  let prev = new Float64Array(S).fill(-Infinity), cur = new Float64Array(S);
+  const back = new Uint8Array(T * S);
+  prev[0] = lp[0][0]; prev[1] = lp[0][toks[0]];
+  for (let t = 1; t < T; t++) {
+    const row = lp[t];
+    for (let s = 0; s < S; s++) {
+      let best = prev[s], k = 0;
+      if (s > 0 && prev[s - 1] > best) { best = prev[s - 1]; k = 1; }
+      if (s > 1 && (s & 1) && toks[s >> 1] !== toks[(s >> 1) - 1] && prev[s - 2] > best) { best = prev[s - 2]; k = 2; }
+      cur[s] = best + row[s & 1 ? toks[s >> 1] : 0]; back[t * S + s] = k;
+    }
+    [prev, cur] = [cur, prev];
+  }
+  let s = prev[S - 1] >= prev[S - 2] ? S - 1 : S - 2;
+  if (prev[s] === -Infinity) return null;
+  const first = new Int32Array(toks.length).fill(-1), last = new Int32Array(toks.length).fill(-1);
+  for (let t = T - 1; t >= 0; t--) {
+    if (s & 1) { const i = s >> 1; if (last[i] < 0) last[i] = t; first[i] = t; }
+    s -= back[t * S + s];
+  }
+  return { first, last };
+}
+
+// Syllables placed by the aligner, in the same shape as findSyllables gives. Each script syllable spans its
+// letters; the cut between two goes in the middle of any pause between them, else at their quietest 10 ms.
+// Null when the script can't be aligned (a syllable with no A–Z letters, like "5"), so the caller can fall back.
+async function alignSyllables(x, words, onProgress) {
+  const ids = words.map((w) => [...w.s.normalize('NFD').toUpperCase()].filter((c) => /[A-Z]/.test(c)).map((c) => 5 + ALIGN_LETTERS.indexOf(c)));
+  if (!ids.length || ids.some((l) => !l.length)) return null;
+  const session = await loadAligner(onProgress);
+  const al = ctcAlign(await alignerLogProbs(session, to16k(x)), ids.flat());
+  if (!al) return null;
+  const hop = Math.round(SAMPLE_RATE * 0.01), n = Math.floor(x.length / hop), db = new Float32Array(n);
+  for (let f = 0; f < n; f++) { let e = 0; for (let i = f * hop, end = i + hop; i < end; i++) e += x[i] * x[i]; db[f] = 10 * Math.log10(e / hop + 1e-10); }
+  const sorted = Float32Array.from(db).sort(), top = sorted[n - 1], silence = Math.max(top - 40, sorted[Math.floor(n * 0.1)] + 6);
+  let k = 0;
+  const spans = ids.map((l) => { const span = [al.first[k] * 2, Math.min(n, (al.last[k + l.length - 1] + 1) * 2)]; k += l.length; return span; }); // 10 ms frames
+  const sylls = spans.map(([a, b], j) => {
+    let pk = a; for (let f = a; f < Math.max(a + 1, b); f++) if (db[f] > db[pk]) pk = f;
+    return { peak: pk, lvl: db[pk] - top, text: [j, j + 1] };
+  });
+  let a = spans[0][0]; for (let m = 0; m < 15 && a > 0 && db[a - 1] > silence; m++) a--;
+  sylls[0].a = Math.max(0, a - 2) * hop;
+  for (let i = 0; i < sylls.length - 1; i++) {
+    const g1 = Math.min(n - 1, spans[i + 1][0]), g0 = Math.min(spans[i][1], g1);
+    let rl = -1, rr = -1;
+    for (let f = g0; f <= g1; f++) if (db[f] <= silence) { let g = f; while (g < g1 && db[g + 1] <= silence) g++; if (g - f > rr - rl) { rl = f; rr = g; } f = g; }
+    let cut = g0; for (let f = g0; f <= g1; f++) if (db[f] < db[cut]) cut = f;
+    const pause = rl >= 0 ? (rr - rl + 1) * hop / 2 : 0;
+    sylls[i].b = sylls[i + 1].a = rl >= 0 ? Math.round((rl + rr + 1) / 2) * hop : cut * hop;
+    sylls[i].quiet = [pause, pause];
+  }
+  const last = sylls[sylls.length - 1];
+  let b = spans[spans.length - 1][1]; for (let m = 0; m < 30 && b < n - 1 && db[b] > silence; m++) b++;
+  last.b = Math.min(x.length, (b + 3) * hop);
+  last.quiet = [0, x.length - last.b];
+  return sylls;
 }
 
 // Each syllable carries pitch (semitones), glide (semitones the pitch bends by across it), range (−100…100 % of its
@@ -2006,6 +2199,13 @@ function splitSyllable(x, sr, ss, i, parts) {
   }));
 }
 
+// Joins syllables i…j into one that keeps the first one's settings and the last one's pause.
+function joinSyllables(ss, i, j) {
+  const run = ss.slice(i, j + 1);
+  return { ...ss[i], b: ss[j].b, quiet: ss[j].quiet, space: ss[j].space, lvl: Math.max(...run.map((s) => s.lvl)),
+    label: run.map((s, k) => (k && s.ws ? ' ' : '') + s.label).join('') };
+}
+
 // A small modal asking where to cut the syllable's text; calls back with the pieces.
 function splitDialog(label, onSplit) {
   const input = h('input', { type: 'text', value: label, spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Syllable text' });
@@ -2028,7 +2228,7 @@ function splitDialog(label, onSplit) {
 
 // One editor at a time, bound to the newest take, so edits survive re-renders of the outputs pane.
 // ramp spreads slider moves over a multi-syllable selection: 0 evenly, 1 building toward the end, -1 fading out.
-const EMO = { takeId: null, open: false, sylls: [], sel: [0, 0], anchor: 0, ramp: 0, undo: [], redo: [], track: null, out: null, timer: 0, tick: null };
+const EMO = { takeId: null, open: false, busy: false, sylls: [], sel: [0, 0], anchor: 0, ramp: 0, undo: [], redo: [], track: null, out: null, timer: 0, tick: null };
 const EMO_FIELDS = [
   { k: 'pitch', group: 'Pitch', label: 'Pitch', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'Raise or lower the syllable' },
   { k: 'glide', group: 'Pitch', label: 'Glide', min: -12, max: 12, step: 0.5, def: 0, fmt: signed(' st'), hint: 'How far the pitch rises (or falls) through the syllable, in place of its natural movement: up for a questioning lift, down for a falling, final tone' },
@@ -2051,16 +2251,29 @@ const EMO_RAMPS = [
 async function toggleEmotion(t, btn) {
   if (EMO.open && EMO.takeId === t.id) { EMO.open = false; return renderOutputs(t.voiceId); }
   if (EMO.takeId !== t.id) {
-    btn.disabled = true; btn.textContent = 'Analyzing…'; await sleep0();
+    if (EMO.busy) return;
+    EMO.busy = true; btn.disabled = true; btn.textContent = 'Analyzing…'; await sleep0();
     const words = textSyllables(t.text);
-    const sylls = findSyllables(t.samples, SAMPLE_RATE, t.partial ? 0 : words.length);
+    // The aligner places the script's syllables; a take stopped early doesn't hold the whole script, so it (and
+    // any aligner failure) falls back to finding syllables from loudness alone.
+    let sylls = null;
+    if (!t.partial) {
+      try {
+        sylls = await alignSyllables(t.samples, words, (loaded, total, cached) => {
+          if (!cached) btn.textContent = loaded < total ? `Downloading syllable finder · ${fmtMB(loaded)} / ${fmtMB(total)}` : 'Analyzing…';
+        });
+      } catch (e) {
+        log('Syllable aligner failed: ' + (e.message || e));
+        toast('Could not load the syllable finder, so syllables are a rougher guess this time.', true);
+      }
+    }
+    EMO.busy = false;
+    sylls ??= findSyllables(t.samples, SAMPLE_RATE, t.partial ? null : words);
     if (!sylls.length) { toast('No syllables found in this take.', true); return renderOutputs(t.voiceId); }
-    const M = words.length, N = sylls.length;
     sylls.forEach((s, j) => {
-      const from = Math.floor(j * M / N), to = Math.max(from + 1, Math.floor((j + 1) * M / N));
-      const part = words.slice(from, Math.min(M, to));
+      const part = s.text ? words.slice(...s.text) : [];
       Object.assign(s, {
-        label: part.map((w) => w.s).join('') || String(j + 1),
+        label: part.map((w, k) => (k && w.first ? ' ' : '') + w.s).join('') || String(j + 1),
         ws: j > 0 && !!part[0]?.first,
         ...Object.fromEntries(EMO_FIELDS.map((f) => [f.k, f.def])),
       });
@@ -2148,6 +2361,15 @@ function emotionPanel(t) {
       $('emo')?.querySelectorAll('.syl')[i]?.focus({ preventScroll: true });
     });
   } }, icon('split'), 'Split');
+  const joinBtn = h('button', { class: 'btn sm ghost', title: 'Join the selected syllables into one, to redo a cut in the wrong place with Split', onclick: async () => {
+    const [i, j] = EMO.sel;
+    emoRemember();
+    ss.splice(i, j - i + 1, joinSyllables(ss, i, j));
+    EMO.anchor = i; EMO.sel = [i, i];
+    await renderOutputs(t.voiceId);
+    emoChanged(t);
+    $('emo')?.querySelectorAll('.syl')[i]?.focus({ preventScroll: true });
+  } }, icon('join'), 'Join');
   const edit = (fn) => { emoRemember(); for (const s of sel()) fn(s); update(); emoChanged(t); };
   // The share of a slider move each selected syllable takes, by its place k in a selection of m.
   const weight = (k, m) => m < 2 || !EMO.ramp ? 1 : EMO.ramp > 0 ? k / (m - 1) : 1 - k / (m - 1);
@@ -2192,6 +2414,7 @@ function emotionPanel(t) {
       tick.style.transform = `rotate(${-Math.atan2(s.glide / 12 * 0.42 * 44, w - 6)}rad)`;
     });
     const picked = sel(), m = picked.length;
+    joinBtn.disabled = m < 2;
     splitBtn.disabled = m > 1 || picked[0].label.length < 2 || picked[0].b - picked[0].a < SAMPLE_RATE * 0.06;
     what.textContent = m > 1 ? `${m} syllables · ${picked.map((s, i) => (i && s.ws ? ' ' : '') + s.label).join('')}`.slice(0, 60) : `“${picked[0].label}”`;
     spread.hidden = m < 2;
@@ -2223,11 +2446,11 @@ function emotionPanel(t) {
     lane,
     h('div', { class: 'row' }, what,
       h('button', { class: 'btn sm ghost', onclick: () => { EMO.anchor = 0; EMO.sel = [0, n - 1]; update(); } }, 'Select all'),
-      splitBtn,
+      splitBtn, joinBtn,
       h('button', { class: 'btn sm ghost', onclick: () => edit((s) => { for (const f of EMO_FIELDS) s[f.k] = f.def; }) }, icon('reset'), 'Reset')),
     spread,
     sliders,
-    h('p', { class: 'muted small', style: 'margin:0' }, 'Shift-click or shift-arrow to select a run of syllables. Double-click a setting’s name to reset it. Ctrl/⌘-Z undoes.'),
+    h('p', { class: 'muted small', style: 'margin:0' }, 'Shift-click or shift-arrow to select a run of syllables. If a cut is in the wrong place, Join the syllables either side and Split them again. Double-click a setting’s name to reset it. Ctrl/⌘-Z undoes.'),
     h('div', { class: 'wave-row' },
       h('button', { class: 'play sm', 'data-play': t.id + '~emo', 'aria-label': 'Play', onclick: () => playTake(emoOut(t)) }, icon('play')),
       h('div', { class: 'grow', style: 'min-width:0' }, canvas)),
